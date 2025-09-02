@@ -1,4 +1,4 @@
 ﻿  UGI.c
-C:\Users\zab2x\Downloads\UGI.c(151,75): warning C4244: 'initializing': conversion from 'size_t' to 'float', possible loss of data
-C:\Users\zab2x\Downloads\UGI.c(152,53): warning C4244: 'initializing': conversion from 'int' to 'float', possible loss of data
+C:\Users\zab2x\Downloads\UGI.c(182,75): warning C4244: 'initializing': conversion from 'size_t' to 'float', possible loss of data
+C:\Users\zab2x\Downloads\UGI.c(183,53): warning C4244: 'initializing': conversion from 'int' to 'float', possible loss of data
   UniversalGyroInput.vcxproj -> C:\Users\zab2x\Documents\Git-Fork\UniversalGyroInput\x64\Debug\UniversalGyroInput.exe
