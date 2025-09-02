@@ -8,19 +8,28 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include <stdio.h> // For snprintf
 
 #define CLAMP(v, min, max) (((v) < (min)) ? (min) : (((v) > (max)) ? (max) : (v)))
 
+// --- Global State ---
 static SDL_Window* window = NULL;
 static SDL_Renderer* renderer = NULL;
 static SDL_Gamepad* gamepad = NULL;
 static SDL_JoystickID gamepad_instance_id = 0;
-static float gyro_data[3] = { 0.0f, 0.0f, 0.0f };
-static bool isAiming = false;
-static SDL_GamepadButton selected_button = -1;
-static SDL_GamepadAxis selected_axis = -1;
+
 static PVIGEM_CLIENT vigem_client = NULL;
 static PVIGEM_TARGET x360_pad = NULL;
+
+// Gyro and Aiming state
+static float gyro_data[3] = { 0.0f, 0.0f, 0.0f };
+static bool isAiming = false;
+
+// User configuration
+static SDL_GamepadButton selected_button = -1;
+static SDL_GamepadAxis selected_axis = -1;
+static float sensitivity_x = -5.0f;
+static float sensitivity_y = 5.0f;
 
 /* This function runs once at startup. */
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
@@ -32,7 +41,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 		return SDL_APP_FAILURE;
 	}
 
-	if (!SDL_CreateWindowAndRenderer("Global Gyro Aim", 400, 150, SDL_WINDOW_RESIZABLE, &window, &renderer)) {
+	if (!SDL_CreateWindowAndRenderer("Universal Gyro Input", 500, 250, SDL_WINDOW_RESIZABLE, &window, &renderer)) {
 		SDL_Log("Couldn't create window and renderer: %s", SDL_GetError());
 		return SDL_APP_FAILURE;
 	}
@@ -62,9 +71,32 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 {
 	switch (event->type) {
-	case SDL_EVENT_KEY_DOWN:
 	case SDL_EVENT_QUIT:
 		return SDL_APP_SUCCESS;
+
+	case SDL_EVENT_KEY_DOWN:
+		switch (event->key.key) {
+		case SDLK_C:
+			SDL_Log("Change aim button requested. Press a button or trigger on the gamepad.");
+			selected_button = -1;
+			selected_axis = -1;
+			isAiming = false;
+			break;
+		case SDLK_UP:
+			sensitivity_y += 0.5f;
+			sensitivity_x -= 0.5f;
+			SDL_Log("Sensitivity increased to X: %.2f, Y: %.2f", sensitivity_x, sensitivity_y);
+			break;
+		case SDLK_DOWN:
+			sensitivity_y -= 0.5f;
+			sensitivity_x += 0.5f;
+			SDL_Log("Sensitivity decreased to X: %.2f, Y: %.2f", sensitivity_x, sensitivity_y);
+			break;
+		case SDLK_Q:
+		case SDLK_ESCAPE:
+			return SDL_APP_SUCCESS;
+		}
+		break;
 
 	case SDL_EVENT_GAMEPAD_ADDED:
 		if (!gamepad) {
@@ -96,6 +128,7 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 		if (event->gbutton.which == gamepad_instance_id) {
 			if (selected_button == -1 && selected_axis == -1 && event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
 				selected_button = event->gbutton.button;
+				SDL_Log("Aim button set to: %s", SDL_GetGamepadStringForButton(selected_button));
 			}
 			else if (event->gbutton.button == selected_button) {
 				isAiming = (event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
@@ -108,7 +141,10 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			if (selected_button == -1 && selected_axis == -1) {
 				if (event->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ||
 					event->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) {
-					selected_axis = event->gaxis.axis;
+					if (event->gaxis.value > 8000) {
+						selected_axis = event->gaxis.axis;
+						SDL_Log("Aim trigger set to: %s", SDL_GetGamepadStringForAxis(selected_axis));
+					}
 				}
 			}
 			else if (event->gaxis.axis == selected_axis) {
@@ -130,27 +166,11 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 
 SDL_AppResult SDL_AppIterate(void* appstate)
 {
-	const char* message = "Virtual controller active. Minimize this window.";
-	if (!x360_pad) {
-		message = "Virtual controller failed to start.";
-	}
-	else if (!gamepad) {
-		message = "Waiting for physical controller...";
-	}
-	else if (isAiming) {
-		message = "Aiming with Gyro...";
-	}
-	else if (selected_button == -1 && selected_axis == -1) {
-		message = "Press a button or trigger to select it for aiming.";
-	}
-	else {
-		message = "Waiting for aim button/trigger...";
-	}
-
 	XUSB_REPORT report;
 	XUSB_REPORT_INIT(&report);
 
 	if (gamepad) {
+		// --- Passthrough physical controller state to virtual controller ---
 		// Buttons
 		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_SOUTH)) report.wButtons |= XUSB_GAMEPAD_A;
 		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_EAST)) report.wButtons |= XUSB_GAMEPAD_B;
@@ -180,18 +200,17 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 	}
 
 	if (isAiming) {
-		const float SENSITIVITY_X = -5000.0f;
-		const float SENSITIVITY_Y = 5000.0f;
+		const float FACTOR = 10000.0f;
 		const float DEAD_ZONE = 0.05f;
 
 		float stick_input_x = 0.0f;
 		float stick_input_y = 0.0f;
 
 		if (fabsf(gyro_data[1]) > DEAD_ZONE) {
-			stick_input_x = gyro_data[1] * SENSITIVITY_X;
+			stick_input_x = gyro_data[1] * sensitivity_x * FACTOR;
 		}
 		if (fabsf(gyro_data[0]) > DEAD_ZONE) {
-			stick_input_y = gyro_data[0] * SENSITIVITY_Y;
+			stick_input_y = gyro_data[0] * sensitivity_y * FACTOR;
 		}
 
 		report.sThumbRX = (short)CLAMP(stick_input_x, -32767.0f, 32767.0f);
@@ -202,15 +221,56 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		vigem_target_x360_update(vigem_client, x360_pad, report);
 	}
 
-	// --- Drawing Code ---
-	int w = 0, h = 0;
-	SDL_GetRenderOutputSize(renderer, &w, &h);
-	float x = (w - SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * SDL_strlen(message)) / 2;
-	float y = (h - SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE) / 2;
+	// --- Drawing UI ---
+	char buffer[256];
 	SDL_SetRenderDrawColor(renderer, 25, 25, 40, 255);
 	SDL_RenderClear(renderer);
 	SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255);
-	SDL_RenderDebugText(renderer, x, y, message);
+
+	float y_pos = 10.0f;
+	const float line_height = (float)(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 4);
+
+	// Status message
+	const char* status_message = "Status: OK";
+	if (!x360_pad) {
+		status_message = "Error: Virtual controller failed to start.";
+	}
+	else if (!gamepad) {
+		status_message = "Status: Waiting for physical controller...";
+	}
+	else if (isAiming) {
+		status_message = "Status: Aiming with Gyro...";
+	}
+	SDL_RenderDebugText(renderer, 10, y_pos, status_message);
+	y_pos += line_height * 2;
+
+	// Aim button info
+	if (selected_button != -1) {
+		snprintf(buffer, sizeof(buffer), "Aim Button: %s", SDL_GetGamepadStringForButton(selected_button));
+	}
+	else if (selected_axis != -1) {
+		snprintf(buffer, sizeof(buffer), "Aim Trigger: %s", SDL_GetGamepadStringForAxis(selected_axis));
+	}
+	else {
+		snprintf(buffer, sizeof(buffer), "Aim Button: [Press a button/trigger to set]");
+	}
+	SDL_RenderDebugText(renderer, 10, y_pos, buffer);
+	y_pos += line_height;
+
+	// Sensitivity info
+	snprintf(buffer, sizeof(buffer), "Sensitivity: %.1f", sensitivity_y); // Show one value for simplicity
+	SDL_RenderDebugText(renderer, 10, y_pos, buffer);
+	y_pos += line_height * 2;
+
+	// Instructions
+	SDL_RenderDebugText(renderer, 10, y_pos, "--- Controls ---");
+	y_pos += line_height;
+	SDL_RenderDebugText(renderer, 10, y_pos, " 'C' key:          Change Aim Button");
+	y_pos += line_height;
+	SDL_RenderDebugText(renderer, 10, y_pos, " Up/Down Arrows:   Adjust Sensitivity");
+	y_pos += line_height;
+	SDL_RenderDebugText(renderer, 10, y_pos, " 'Esc' or 'Q' key: Quit");
+
 	SDL_RenderPresent(renderer);
 
 	SDL_Delay(1);
