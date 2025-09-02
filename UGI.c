@@ -12,6 +12,10 @@
 
 #define CLAMP(v, min, max) (((v) < (min)) ? (min) : (((v) > (max)) ? (max) : (v)))
 
+// --- Custom identifiers for our virtual controller ---
+#define VIRTUAL_VENDOR_ID  0xFEED
+#define VIRTUAL_PRODUCT_ID 0xBEEF
+
 // --- Global State ---
 static SDL_Window* window = NULL;
 static SDL_Renderer* renderer = NULL;
@@ -58,6 +62,11 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 	}
 
 	x360_pad = vigem_target_x360_alloc();
+
+	// Set a custom VID/PID to distinguish our virtual controller from real ones
+	vigem_target_set_vid(x360_pad, VIRTUAL_VENDOR_ID);
+	vigem_target_set_pid(x360_pad, VIRTUAL_PRODUCT_ID);
+
 	const VIGEM_ERROR add_ret = vigem_target_add(vigem_client, x360_pad);
 	if (!VIGEM_SUCCESS(add_ret)) {
 		SDL_Log("Error: Failed to add virtual X360 controller: 0x%x", add_ret);
@@ -99,20 +108,38 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 		break;
 
 	case SDL_EVENT_GAMEPAD_ADDED:
-		if (!gamepad) {
-			gamepad = SDL_OpenGamepad(event->gdevice.which);
-			if (gamepad) {
-				gamepad_instance_id = event->gdevice.which;
-				SDL_Log("Opened gamepad: %s", SDL_GetGamepadName(gamepad));
-				if (SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, true) < 0) {
-					SDL_Log("Could not enable gyroscope: %s", SDL_GetError());
-				}
-				else {
-					SDL_Log("Gyroscope enabled!");
-				}
+	{
+		// Open the gamepad temporarily to check its properties
+		SDL_Gamepad* temp_pad = SDL_OpenGamepad(event->gdevice.which);
+		if (!temp_pad) {
+			break;
+		}
+
+		Uint16 vendor = SDL_GetGamepadVendor(temp_pad);
+		Uint16 product = SDL_GetGamepadProduct(temp_pad);
+
+		// Check if the detected gamepad is our own virtual one
+		if (vendor == VIRTUAL_VENDOR_ID && product == VIRTUAL_PRODUCT_ID) {
+			SDL_Log("Ignoring our own virtual controller.");
+			SDL_CloseGamepad(temp_pad); // Close the handle, we don't want it.
+		}
+		else if (!gamepad) {
+			gamepad = temp_pad;
+			gamepad_instance_id = event->gdevice.which;
+			SDL_Log("Opened gamepad: %s (VID: %04X, PID: %04X)", SDL_GetGamepadName(gamepad), vendor, product);
+			if (SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, true) < 0) {
+				SDL_Log("Could not enable gyroscope: %s", SDL_GetError());
+			}
+			else {
+				SDL_Log("Gyroscope enabled!");
 			}
 		}
+		else {
+			SDL_Log("Ignoring additional controller: %s", SDL_GetGamepadName(temp_pad));
+			SDL_CloseGamepad(temp_pad);
+		}
 		break;
+	}
 
 	case SDL_EVENT_GAMEPAD_REMOVED:
 		if (gamepad && event->gdevice.which == gamepad_instance_id) {
@@ -120,6 +147,10 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, false);
 			SDL_CloseGamepad(gamepad);
 			gamepad = NULL;
+			// Reset aiming state on disconnect
+			selected_button = -1;
+			selected_axis = -1;
+			isAiming = false;
 		}
 		break;
 
@@ -171,7 +202,6 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 	if (gamepad) {
 		// --- Passthrough physical controller state to virtual controller ---
-		// Buttons
 		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_SOUTH)) report.wButtons |= XUSB_GAMEPAD_A;
 		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_EAST)) report.wButtons |= XUSB_GAMEPAD_B;
 		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_WEST)) report.wButtons |= XUSB_GAMEPAD_X;
@@ -188,11 +218,9 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) report.wButtons |= XUSB_GAMEPAD_DPAD_RIGHT;
 		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_GUIDE)) report.wButtons |= XUSB_GAMEPAD_GUIDE;
 
-		// Triggers (SDL is -32768 to 32767, XUSB is 0 to 255)
 		report.bLeftTrigger = (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) + 32768) / 257;
 		report.bRightTrigger = (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) + 32768) / 257;
 
-		// Sticks
 		report.sThumbLX = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTX);
 		report.sThumbLY = -SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTY);
 		report.sThumbRX = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
@@ -222,54 +250,54 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 	}
 
 	// --- Drawing UI ---
-	char buffer[256];
 	SDL_SetRenderDrawColor(renderer, 25, 25, 40, 255);
 	SDL_RenderClear(renderer);
 	SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255);
 
-	float y_pos = 10.0f;
-	const float line_height = (float)(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 4);
-
-	// Status message
-	const char* status_message = "Status: OK";
-	if (!x360_pad) {
-		status_message = "Error: Virtual controller failed to start.";
-	}
-	else if (!gamepad) {
-		status_message = "Status: Waiting for physical controller...";
-	}
-	else if (isAiming) {
-		status_message = "Status: Aiming with Gyro...";
-	}
-	SDL_RenderDebugText(renderer, 10, y_pos, status_message);
-	y_pos += line_height * 2;
-
-	// Aim button info
-	if (selected_button != -1) {
-		snprintf(buffer, sizeof(buffer), "Aim Button: %s", SDL_GetGamepadStringForButton(selected_button));
-	}
-	else if (selected_axis != -1) {
-		snprintf(buffer, sizeof(buffer), "Aim Trigger: %s", SDL_GetGamepadStringForAxis(selected_axis));
+	if (!gamepad) {
+		const char* message = "Status: Waiting for physical controller...";
+		int w = 0, h = 0;
+		SDL_GetRenderOutputSize(renderer, &w, &h);
+		float x = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * SDL_strlen(message)) / 2.0f;
+		float y = (h - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE) / 2.0f;
+		SDL_RenderDebugText(renderer, x, y, message);
 	}
 	else {
-		snprintf(buffer, sizeof(buffer), "Aim Button: [Press a button/trigger to set]");
+		char buffer[256];
+		float y_pos = 10.0f;
+		const float line_height = (float)(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 4);
+
+		const char* status_message = "Status: OK";
+		if (isAiming) {
+			status_message = "Status: Aiming with Gyro...";
+		}
+		SDL_RenderDebugText(renderer, 10, y_pos, status_message);
+		y_pos += line_height * 2;
+
+		if (selected_button != -1) {
+			snprintf(buffer, sizeof(buffer), "Aim Button: %s", SDL_GetGamepadStringForButton(selected_button));
+		}
+		else if (selected_axis != -1) {
+			snprintf(buffer, sizeof(buffer), "Aim Trigger: %s", SDL_GetGamepadStringForAxis(selected_axis));
+		}
+		else {
+			snprintf(buffer, sizeof(buffer), "Aim Button: [Press a button/trigger to set]");
+		}
+		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
+		y_pos += line_height;
+
+		snprintf(buffer, sizeof(buffer), "Sensitivity: %.1f", sensitivity_y);
+		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
+		y_pos += line_height * 2;
+
+		SDL_RenderDebugText(renderer, 10, y_pos, "--- Controls ---");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'C' key:          Change Aim Button");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, " Up/Down Arrows:   Adjust Sensitivity");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'Esc' or 'Q' key: Quit");
 	}
-	SDL_RenderDebugText(renderer, 10, y_pos, buffer);
-	y_pos += line_height;
-
-	// Sensitivity info
-	snprintf(buffer, sizeof(buffer), "Sensitivity: %.1f", sensitivity_y); // Show one value for simplicity
-	SDL_RenderDebugText(renderer, 10, y_pos, buffer);
-	y_pos += line_height * 2;
-
-	// Instructions
-	SDL_RenderDebugText(renderer, 10, y_pos, "--- Controls ---");
-	y_pos += line_height;
-	SDL_RenderDebugText(renderer, 10, y_pos, " 'C' key:          Change Aim Button");
-	y_pos += line_height;
-	SDL_RenderDebugText(renderer, 10, y_pos, " Up/Down Arrows:   Adjust Sensitivity");
-	y_pos += line_height;
-	SDL_RenderDebugText(renderer, 10, y_pos, " 'Esc' or 'Q' key: Quit");
 
 	SDL_RenderPresent(renderer);
 
