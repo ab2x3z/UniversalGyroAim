@@ -1,0 +1,6 @@
+﻿  UGI.c
+C:\Users\zab2x\Downloads\UGI.c(38,40): warning C4244: 'function': conversion from 'int' to 'float', possible loss of data
+C:\Users\zab2x\Downloads\UGI.c(38,54): warning C4244: 'function': conversion from 'int' to 'float', possible loss of data
+C:\Users\zab2x\Downloads\UGI.c(130,40): warning C4244: 'function': conversion from 'int' to 'float', possible loss of data
+C:\Users\zab2x\Downloads\UGI.c(130,54): warning C4244: 'function': conversion from 'int' to 'float', possible loss of data
+  UniversalGyroInput.vcxproj -> C:\Users\zab2x\Documents\Git-Fork\UniversalGyroInput\x64\Debug\UniversalGyroInput.exe
