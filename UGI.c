@@ -8,7 +8,7 @@
 
 #include <math.h>
 #include <stdbool.h>
-#include <stdio.h> // For snprintf
+#include <stdio.h>
 
 #define CLAMP(v, min, max) (((v) < (min)) ? (min) : (((v) > (max)) ? (max) : (v)))
 
@@ -229,7 +229,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 	if (isAiming) {
 		const float FACTOR = 10000.0f;
-		const float DEAD_ZONE = 0.05f;
+		const float DEAD_ZONE = 0.0f;
 
 		float stick_input_x = 0.0f;
 		float stick_input_y = 0.0f;
