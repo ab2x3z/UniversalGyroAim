@@ -229,18 +229,13 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 	if (isAiming) {
 		const float FACTOR = 10000.0f;
-		const float DEAD_ZONE = 0.0f;
 
 		float stick_input_x = 0.0f;
 		float stick_input_y = 0.0f;
 
-		if (fabsf(gyro_data[1]) > DEAD_ZONE) {
-			stick_input_x = gyro_data[1] * sensitivity_x * FACTOR;
-		}
-		if (fabsf(gyro_data[0]) > DEAD_ZONE) {
-			stick_input_y = gyro_data[0] * sensitivity_y * FACTOR;
-		}
-
+		stick_input_x = gyro_data[1] * sensitivity_x * FACTOR;
+		stick_input_y = gyro_data[0] * sensitivity_y * FACTOR;
+		
 		report.sThumbRX = (short)CLAMP(stick_input_x, -32767.0f, 32767.0f);
 		report.sThumbRY = (short)CLAMP(stick_input_y, -32767.0f, 32767.0f);
 	}
