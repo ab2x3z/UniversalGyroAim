@@ -36,6 +36,7 @@ static SDL_GamepadAxis selected_axis = -1;
 static float sensitivity = 5.0f;
 static bool invert_gyro_x = false;
 static bool invert_gyro_y = false;
+static float anti_deathzone = 0.0f; // Percentage from 0.0f to 100.0f
 
 
 // --- Drawing Helper Functions ---
@@ -192,6 +193,7 @@ static bool reset_application(void)
 	sensitivity = 5.0f;
 	invert_gyro_x = false;
 	invert_gyro_y = false;
+	anti_deathzone = 0.0f;
 
 	// 3. Re-initialize resources
 	SDL_Log("Re-initializing ViGEmBus...");
@@ -234,7 +236,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 		return SDL_APP_FAILURE;
 	}
 
-	if (!SDL_CreateWindowAndRenderer("Universal Gyro Aim", 500, 160, 0, &window, &renderer)) {
+	if (!SDL_CreateWindowAndRenderer("Universal Gyro Aim", 460, 180, 0, &window, &renderer)) {
 		SDL_Log("Couldn't create window and renderer: %s", SDL_GetError());
 		return SDL_APP_FAILURE;
 	}
@@ -309,6 +311,16 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			sensitivity -= 0.5f;
 			sensitivity = CLAMP(sensitivity, 0.5f, 50.0f);
 			SDL_Log("Sensitivity decreased to %.2f", sensitivity);
+			break;
+		case SDLK_RIGHT:
+			anti_deathzone += 1.0f;
+			anti_deathzone = CLAMP(anti_deathzone, 0.0f, 90.0f);
+			SDL_Log("Anti-Deadzone increased to %.0f%%", anti_deathzone);
+			break;
+		case SDLK_LEFT:
+			anti_deathzone -= 1.0f;
+			anti_deathzone = CLAMP(anti_deathzone, 0.0f, 90.0f);
+			SDL_Log("Anti-Deadzone decreased to %.0f%%", anti_deathzone);
 			break;
 		}
 		break;
@@ -440,6 +452,26 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		float stick_input_x = gyro_data[1] * sensitivity * x_multiplier;
 		float stick_input_y = gyro_data[0] * sensitivity * y_multiplier;
 
+		// --- Apply Anti-Deadzone ---
+		if (anti_deathzone > 0.0f) {
+			const float max_stick_val = 32767.0f;
+			float magnitude = sqrtf(stick_input_x * stick_input_x + stick_input_y * stick_input_y);
+
+			if (magnitude > 0.01f) {
+				float normalized_mag = magnitude / max_stick_val;
+
+				if (normalized_mag <= 1.0f) {
+					float dz_fraction = anti_deathzone / 100.0f;
+
+					float new_normalized_mag = dz_fraction + (1.0f - dz_fraction) * normalized_mag;
+
+					float scale_factor = new_normalized_mag / normalized_mag;
+					stick_input_x *= scale_factor;
+					stick_input_y *= scale_factor;
+				}
+			}
+		}
+
 		report.sThumbRX = (short)CLAMP(stick_input_x, -32767.0f, 32767.0f);
 		report.sThumbRY = (short)CLAMP(stick_input_y, -32767.0f, 32767.0f);
 	}
@@ -495,6 +527,10 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height;
 
+		snprintf(buffer, sizeof(buffer), "Anti-Deadzone: %.0f%%", anti_deathzone);
+		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
+		y_pos += line_height;
+
 		snprintf(buffer, sizeof(buffer), "Invert Gyro -> X-Axis: %s | Y-Axis: %s",
 			invert_gyro_x ? "ON" : "OFF",
 			invert_gyro_y ? "ON" : "OFF");
@@ -504,17 +540,19 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 		SDL_RenderDebugText(renderer, 10, y_pos, "--- Controls ---");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'C' key:          Change Aim Button");
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'C' key:       Change Aim Button");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'T' key:          Toggle Always-On Gyro");
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'T' key:       Toggle Always-On Gyro");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'I' key:          Invert Gyro Y-Axis");
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'I' key:       Invert Gyro Y-Axis");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'O' key:          Invert Gyro X-Axis");
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'O' key:       Invert Gyro X-Axis");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'R' key:          Reset Application");
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'R' key:       Reset Application");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " Up/Down Arrows:   Adjust Sensitivity");
+		SDL_RenderDebugText(renderer, 10, y_pos, " Up/Down:       Adjust Sensitivity");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, " Left/Right:    Adjust Anti-Deadzone");
 
 		// --- Gyro Visualizer ---
 		int w, h;
@@ -522,7 +560,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 		// Position the visualizer at the bottom right
 		const int centerX = w - 80;
-		const int centerY = h - 90;
+		const int centerY = h - 70;
 		const int outerRadius = 50;
 		const int innerRadius = 5;
 		const float visualizerScale = 20.0f;
