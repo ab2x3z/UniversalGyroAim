@@ -16,6 +16,22 @@
 #define VIRTUAL_VENDOR_ID  0xFEED
 #define VIRTUAL_PRODUCT_ID 0xBEEF
 
+// --- Configuration file ---
+#define CONFIG_FILENAME "uga_config.dat"
+#define CURRENT_CONFIG_VERSION 1
+
+// --- User configuration structure ---
+typedef struct {
+	SDL_GamepadButton selected_button;
+	SDL_GamepadAxis selected_axis;
+	float sensitivity;
+	bool invert_gyro_x;
+	bool invert_gyro_y;
+	float anti_deathzone;
+	bool always_on_gyro;
+	int config_version;
+} AppSettings;
+
 // --- Global State ---
 static SDL_Window* window = NULL;
 static SDL_Renderer* renderer = NULL;
@@ -28,22 +44,71 @@ static PVIGEM_TARGET x360_pad = NULL;
 // Gyro and Aiming state
 static float gyro_data[3] = { 0.0f, 0.0f, 0.0f };
 static bool isAiming = false;
-static bool always_on_gyro = false;
 
-// User configuration
-static SDL_GamepadButton selected_button = -1;
-static SDL_GamepadAxis selected_axis = -1;
-static float sensitivity = 5.0f;
-static bool invert_gyro_x = false;
-static bool invert_gyro_y = false;
-static float anti_deathzone = 0.0f; // Percentage from 0.0f to 100.0f
+// User configuration instance
+static AppSettings settings;
+
+
+// --- Settings Management Functions ---
+
+static void SetDefaultSettings(void) {
+	SDL_Log("Loading default settings.");
+	settings.selected_button = -1;
+	settings.selected_axis = -1;
+	settings.sensitivity = 5.0f;
+	settings.invert_gyro_x = false;
+	settings.invert_gyro_y = false;
+	settings.anti_deathzone = 0.0f;
+	settings.always_on_gyro = false;
+	settings.config_version = CURRENT_CONFIG_VERSION;
+}
+
+static void SaveSettings(void) {
+	FILE* file = fopen(CONFIG_FILENAME, "wb");
+	if (!file) {
+		SDL_Log("Error: Could not open %s for writing.", CONFIG_FILENAME);
+		return;
+	}
+
+	if (fwrite(&settings, sizeof(AppSettings), 1, file) != 1) {
+		SDL_Log("Error: Failed to write settings to %s.", CONFIG_FILENAME);
+	}
+	else {
+		SDL_Log("Settings saved successfully to %s.", CONFIG_FILENAME);
+	}
+
+	fclose(file);
+}
+
+static bool LoadSettings(void) {
+	FILE* file = fopen(CONFIG_FILENAME, "rb");
+	if (!file) {
+		SDL_Log("Info: No config file found (%s). Using defaults.", CONFIG_FILENAME);
+		return false;
+	}
+
+	AppSettings loaded_settings;
+	if (fread(&loaded_settings, sizeof(AppSettings), 1, file) != 1) {
+		SDL_Log("Error: Failed to read settings from %s. Using defaults.", CONFIG_FILENAME);
+		fclose(file);
+		return false;
+	}
+
+	fclose(file);
+
+	if (loaded_settings.config_version != CURRENT_CONFIG_VERSION) {
+		SDL_Log("Warning: Config file version mismatch. Expected %d, got %d. Using defaults.", CURRENT_CONFIG_VERSION, loaded_settings.config_version);
+		return false;
+	}
+
+	settings = loaded_settings;
+	SDL_Log("Settings loaded successfully from %s.", CONFIG_FILENAME);
+	return true;
+}
 
 
 // --- Drawing Helper Functions ---
 
-/**
- * @brief Draws the outline of a circle using the Midpoint circle algorithm.
- */
 void DrawCircle(SDL_Renderer* renderer, int centreX, int centreY, int radius)
 {
 	const int32_t diameter = (radius * 2);
@@ -187,13 +252,7 @@ static bool reset_application(void)
 	gamepad_instance_id = 0;
 	gyro_data[0] = 0.0f; gyro_data[1] = 0.0f; gyro_data[2] = 0.0f;
 	isAiming = false;
-	always_on_gyro = false;
-	selected_button = -1;
-	selected_axis = -1;
-	sensitivity = 5.0f;
-	invert_gyro_x = false;
-	invert_gyro_y = false;
-	anti_deathzone = 0.0f;
+	SetDefaultSettings();
 
 	// 3. Re-initialize resources
 	SDL_Log("Re-initializing ViGEmBus...");
@@ -236,7 +295,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 		return SDL_APP_FAILURE;
 	}
 
-	if (!SDL_CreateWindowAndRenderer("Universal Gyro Aim", 460, 180, 0, &window, &renderer)) {
+	if (!SDL_CreateWindowAndRenderer("Universal Gyro Aim", 460, 190, 0, &window, &renderer)) {
 		SDL_Log("Couldn't create window and renderer: %s", SDL_GetError());
 		return SDL_APP_FAILURE;
 	}
@@ -265,6 +324,11 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 	}
 
 	SDL_Log("App started. Virtual Xbox 360 controller is active.");
+
+	if (!LoadSettings()) {
+		SetDefaultSettings();
+	}
+
 	return SDL_APP_CONTINUE;
 }
 
@@ -278,24 +342,27 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 		switch (event->key.key) {
 		case SDLK_C:
 			SDL_Log("Change aim button requested. Press a button or trigger on the gamepad.");
-			selected_button = -1;
-			selected_axis = -1;
+			settings.selected_button = -1;
+			settings.selected_axis = -1;
 			isAiming = false;
 			break;
 		case SDLK_T:
-			always_on_gyro = !always_on_gyro;
-			if (always_on_gyro) {
+			settings.always_on_gyro = !settings.always_on_gyro;
+			if (settings.always_on_gyro) {
 				isAiming = false;
 			}
-			SDL_Log("Always-on gyro toggled %s.", always_on_gyro ? "ON" : "OFF");
+			SDL_Log("Always-on gyro toggled %s.", settings.always_on_gyro ? "ON" : "OFF");
 			break;
 		case SDLK_I:
-			invert_gyro_y = !invert_gyro_y;
-			SDL_Log("Invert Gyro Y-Axis (Pitch) toggled %s.", invert_gyro_y ? "ON" : "OFF");
+			settings.invert_gyro_y = !settings.invert_gyro_y;
+			SDL_Log("Invert Gyro Y-Axis (Pitch) toggled %s.", settings.invert_gyro_y ? "ON" : "OFF");
 			break;
 		case SDLK_O:
-			invert_gyro_x = !invert_gyro_x;
-			SDL_Log("Invert Gyro X-Axis (Yaw) toggled %s.", invert_gyro_x ? "ON" : "OFF");
+			settings.invert_gyro_x = !settings.invert_gyro_x;
+			SDL_Log("Invert Gyro X-Axis (Yaw) toggled %s.", settings.invert_gyro_x ? "ON" : "OFF");
+			break;
+		case SDLK_S:
+			SaveSettings();
 			break;
 		case SDLK_R:
 			if (!reset_application()) {
@@ -303,24 +370,24 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			}
 			break;
 		case SDLK_UP:
-			sensitivity += 0.5f;
-			sensitivity = CLAMP(sensitivity, 0.5f, 50.0f);
-			SDL_Log("Sensitivity increased to %.2f", sensitivity);
+			settings.sensitivity += 0.5f;
+			settings.sensitivity = CLAMP(settings.sensitivity, 0.5f, 50.0f);
+			SDL_Log("Sensitivity increased to %.2f", settings.sensitivity);
 			break;
 		case SDLK_DOWN:
-			sensitivity -= 0.5f;
-			sensitivity = CLAMP(sensitivity, 0.5f, 50.0f);
-			SDL_Log("Sensitivity decreased to %.2f", sensitivity);
+			settings.sensitivity -= 0.5f;
+			settings.sensitivity = CLAMP(settings.sensitivity, 0.5f, 50.0f);
+			SDL_Log("Sensitivity decreased to %.2f", settings.sensitivity);
 			break;
 		case SDLK_RIGHT:
-			anti_deathzone += 1.0f;
-			anti_deathzone = CLAMP(anti_deathzone, 0.0f, 90.0f);
-			SDL_Log("Anti-Deadzone increased to %.0f%%", anti_deathzone);
+			settings.anti_deathzone += 1.0f;
+			settings.anti_deathzone = CLAMP(settings.anti_deathzone, 0.0f, 90.0f);
+			SDL_Log("Anti-Deadzone increased to %.0f%%", settings.anti_deathzone);
 			break;
 		case SDLK_LEFT:
-			anti_deathzone -= 1.0f;
-			anti_deathzone = CLAMP(anti_deathzone, 0.0f, 90.0f);
-			SDL_Log("Anti-Deadzone decreased to %.0f%%", anti_deathzone);
+			settings.anti_deathzone -= 1.0f;
+			settings.anti_deathzone = CLAMP(settings.anti_deathzone, 0.0f, 90.0f);
+			SDL_Log("Anti-Deadzone decreased to %.0f%%", settings.anti_deathzone);
 			break;
 		}
 		break;
@@ -366,8 +433,8 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			SDL_CloseGamepad(gamepad);
 			gamepad = NULL;
 			// Reset aiming state on disconnect
-			selected_button = -1;
-			selected_axis = -1;
+			settings.selected_button = -1;
+			settings.selected_axis = -1;
 			isAiming = false;
 		}
 		break;
@@ -375,11 +442,11 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 	case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
 	case SDL_EVENT_GAMEPAD_BUTTON_UP:
 		if (event->gbutton.which == gamepad_instance_id) {
-			if (selected_button == -1 && selected_axis == -1 && event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
-				selected_button = event->gbutton.button;
-				SDL_Log("Aim button set to: %s", SDL_GetGamepadStringForButton(selected_button));
+			if (settings.selected_button == -1 && settings.selected_axis == -1 && event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+				settings.selected_button = event->gbutton.button;
+				SDL_Log("Aim button set to: %s", SDL_GetGamepadStringForButton(settings.selected_button));
 			}
-			else if (event->gbutton.button == selected_button) {
+			else if (event->gbutton.button == settings.selected_button) {
 				isAiming = (event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
 			}
 		}
@@ -387,16 +454,16 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 
 	case SDL_EVENT_GAMEPAD_AXIS_MOTION:
 		if (event->gaxis.which == gamepad_instance_id) {
-			if (selected_button == -1 && selected_axis == -1) {
+			if (settings.selected_button == -1 && settings.selected_axis == -1) {
 				if (event->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ||
 					event->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) {
 					if (event->gaxis.value > 8000) {
-						selected_axis = event->gaxis.axis;
-						SDL_Log("Aim trigger set to: %s", SDL_GetGamepadStringForAxis(selected_axis));
+						settings.selected_axis = event->gaxis.axis;
+						SDL_Log("Aim trigger set to: %s", SDL_GetGamepadStringForAxis(settings.selected_axis));
 					}
 				}
 			}
-			else if (event->gaxis.axis == selected_axis) {
+			else if (event->gaxis.axis == settings.selected_axis) {
 				isAiming = (event->gaxis.value > 8000);
 			}
 		}
@@ -445,15 +512,15 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		report.sThumbRY = -SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
 	}
 
-	if (isAiming || always_on_gyro) {
-		const float x_multiplier = invert_gyro_x ? 10000.0f : -10000.0f;
-		const float y_multiplier = invert_gyro_y ? -10000.0f : 10000.0f;
+	if (isAiming || settings.always_on_gyro) {
+		const float x_multiplier = settings.invert_gyro_x ? 10000.0f : -10000.0f;
+		const float y_multiplier = settings.invert_gyro_y ? -10000.0f : 10000.0f;
 
-		float stick_input_x = gyro_data[1] * sensitivity * x_multiplier;
-		float stick_input_y = gyro_data[0] * sensitivity * y_multiplier;
+		float stick_input_x = gyro_data[1] * settings.sensitivity * x_multiplier;
+		float stick_input_y = gyro_data[0] * settings.sensitivity * y_multiplier;
 
 		// --- Apply Anti-Deadzone ---
-		if (anti_deathzone > 0.0f) {
+		if (settings.anti_deathzone > 0.0f) {
 			const float max_stick_val = 32767.0f;
 			float magnitude = sqrtf(stick_input_x * stick_input_x + stick_input_y * stick_input_y);
 
@@ -461,7 +528,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 				float normalized_mag = magnitude / max_stick_val;
 
 				if (normalized_mag <= 1.0f) {
-					float dz_fraction = anti_deathzone / 100.0f;
+					float dz_fraction = settings.anti_deathzone / 100.0f;
 
 					float new_normalized_mag = dz_fraction + (1.0f - dz_fraction) * normalized_mag;
 
@@ -499,7 +566,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		const float line_height = (float)(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 4);
 
 		const char* status_message;
-		if (always_on_gyro) {
+		if (settings.always_on_gyro) {
 			status_message = "Status: Gyro Always ON";
 		}
 		else if (isAiming) {
@@ -511,11 +578,11 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		SDL_RenderDebugText(renderer, 10, y_pos, status_message);
 		y_pos += line_height;
 
-		if (selected_button != -1) {
-			snprintf(buffer, sizeof(buffer), "Aim Button: %s", SDL_GetGamepadStringForButton(selected_button));
+		if (settings.selected_button != -1) {
+			snprintf(buffer, sizeof(buffer), "Aim Button: %s", SDL_GetGamepadStringForButton(settings.selected_button));
 		}
-		else if (selected_axis != -1) {
-			snprintf(buffer, sizeof(buffer), "Aim Trigger: %s", SDL_GetGamepadStringForAxis(selected_axis));
+		else if (settings.selected_axis != -1) {
+			snprintf(buffer, sizeof(buffer), "Aim Trigger: %s", SDL_GetGamepadStringForAxis(settings.selected_axis));
 		}
 		else {
 			snprintf(buffer, sizeof(buffer), "Aim Button: [Press 'C' then a button/trigger]");
@@ -523,17 +590,17 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height;
 
-		snprintf(buffer, sizeof(buffer), "Sensitivity: %.1f", sensitivity);
+		snprintf(buffer, sizeof(buffer), "Sensitivity: %.1f", settings.sensitivity);
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height;
 
-		snprintf(buffer, sizeof(buffer), "Anti-Deadzone: %.0f%%", anti_deathzone);
+		snprintf(buffer, sizeof(buffer), "Anti-Deadzone: %.0f%%", settings.anti_deathzone);
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height;
 
 		snprintf(buffer, sizeof(buffer), "Invert Gyro -> X-Axis: %s | Y-Axis: %s",
-			invert_gyro_x ? "ON" : "OFF",
-			invert_gyro_y ? "ON" : "OFF");
+			settings.invert_gyro_x ? "ON" : "OFF",
+			settings.invert_gyro_y ? "ON" : "OFF");
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height * 2;
 
@@ -548,11 +615,14 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		y_pos += line_height;
 		SDL_RenderDebugText(renderer, 10, y_pos, " 'O' key:       Invert Gyro X-Axis");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'R' key:       Reset Application");
-		y_pos += line_height;
 		SDL_RenderDebugText(renderer, 10, y_pos, " Up/Down:       Adjust Sensitivity");
 		y_pos += line_height;
 		SDL_RenderDebugText(renderer, 10, y_pos, " Left/Right:    Adjust Anti-Deadzone");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'S' key:       Save Settings");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'R' key:       Reset Application");
+
 
 		// --- Gyro Visualizer ---
 		int w, h;
@@ -570,8 +640,8 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		DrawCircle(renderer, centerX, centerY, outerRadius);
 
 		// Draw the anti-deadzone inner circle
-		if (anti_deathzone > 0.0f) {
-			int adzRadius = (int)(outerRadius * (anti_deathzone / 100.0f));
+		if (settings.anti_deathzone > 0.0f) {
+			int adzRadius = (int)(outerRadius * (settings.anti_deathzone / 100.0f));
 			if (adzRadius > 0) {
 				SDL_SetRenderDrawColor(renderer, 60, 60, 80, 255);
 				DrawFilledCircle(renderer, centerX, centerY, adzRadius);
@@ -579,8 +649,8 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		}
 
 		// Calculate dot position based on raw gyro input
-		const float x_multiplier = invert_gyro_x ? 1.0f : -1.0f;
-		const float y_multiplier = invert_gyro_y ? -1.0f : 1.0f;
+		const float x_multiplier = settings.invert_gyro_x ? 1.0f : -1.0f;
+		const float y_multiplier = settings.invert_gyro_y ? -1.0f : 1.0f;
 		float dotX_offset = gyro_data[1] * visualizerScale * x_multiplier;
 		float dotY_offset = -gyro_data[0] * visualizerScale * y_multiplier;
 
@@ -595,7 +665,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		int dotY = centerY + (int)dotY_offset;
 
 		// Change color if aiming
-		if (isAiming || always_on_gyro) {
+		if (isAiming || settings.always_on_gyro) {
 			SDL_SetRenderDrawColor(renderer, 255, 80, 80, 255); // Red when aiming
 		}
 		else {
