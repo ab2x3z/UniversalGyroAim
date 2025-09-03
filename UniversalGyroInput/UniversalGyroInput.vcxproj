@@ -132,10 +132,10 @@
       <AdditionalIncludeDirectories>C:\Users\zab2x\Documents\Git-Fork\UniversalGyroInput\libs\ViGEmClient\include;C:\Users\zab2x\Documents\Git-Fork\SDL-release-3.2.20\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <SubSystem>Console</SubSystem>
+      <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>C:\Users\zab2x\Documents\Git-Fork\UniversalGyroInput\libs\ViGEmClient\lib\release\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ViGEmClient.lib;setupapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>C:\Users\zab2x\Documents\Git-Fork\SDL-release-3.2.20\VisualC\x64\Release;C:\Users\zab2x\Documents\Git-Fork\UniversalGyroInput\libs\ViGEmClient\lib\release\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>ViGEmClient.lib;SDL3.lib;user32.lib;gdi32.lib;winmm.lib;imm32.lib;ole32.lib;oleaut32.lib;version.lib;setupapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
