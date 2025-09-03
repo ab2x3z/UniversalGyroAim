@@ -28,12 +28,14 @@ static PVIGEM_TARGET x360_pad = NULL;
 // Gyro and Aiming state
 static float gyro_data[3] = { 0.0f, 0.0f, 0.0f };
 static bool isAiming = false;
+static bool always_on_gyro = false;
 
 // User configuration
 static SDL_GamepadButton selected_button = -1;
 static SDL_GamepadAxis selected_axis = -1;
-static float sensitivity_x = -5.0f;
-static float sensitivity_y = 5.0f;
+static float sensitivity = 5.0f;
+static bool invert_gyro_x = false;
+static bool invert_gyro_y = false;
 
 
 // --- Drawing Helper Functions ---
@@ -109,6 +111,118 @@ void DrawFilledCircle(SDL_Renderer* renderer, int x, int y, int radius)
 	}
 }
 
+/**
+ * @brief Scans for connected gamepads and opens the first valid physical one.
+ */
+static void find_and_open_physical_gamepad(void)
+{
+	if (gamepad) {
+		return; // A gamepad is already open
+	}
+
+	SDL_Log("Scanning for physical controllers...");
+	SDL_JoystickID* joysticks = SDL_GetGamepads(NULL);
+	if (joysticks) {
+		for (int i = 0; joysticks[i] != 0; ++i) {
+			SDL_JoystickID instance_id = joysticks[i];
+			SDL_Gamepad* temp_pad = SDL_OpenGamepad(instance_id);
+			if (!temp_pad) {
+				continue;
+			}
+
+			Uint16 vendor = SDL_GetGamepadVendor(temp_pad);
+			Uint16 product = SDL_GetGamepadProduct(temp_pad);
+
+			// Make sure we don't open our own virtual controller
+			if (vendor == VIRTUAL_VENDOR_ID && product == VIRTUAL_PRODUCT_ID) {
+				SDL_Log("Scan: Ignoring our own virtual controller.");
+				SDL_CloseGamepad(temp_pad);
+			}
+			else {
+				// Found a valid physical controller
+				gamepad = temp_pad;
+				gamepad_instance_id = instance_id;
+				SDL_Log("Opened gamepad: %s (VID: %04X, PID: %04X)", SDL_GetGamepadName(gamepad), vendor, product);
+
+				if (SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, true) < 0) {
+					SDL_Log("Could not enable gyroscope: %s", SDL_GetError());
+				}
+				else {
+					SDL_Log("Gyroscope enabled!");
+				}
+				break; // Stop after finding the first one
+			}
+		}
+		SDL_free(joysticks);
+	}
+}
+
+
+static bool reset_application(void)
+{
+	SDL_Log("--- RESETTING APPLICATION ---");
+
+	// 1. Cleanup existing resources
+	if (gamepad) {
+		SDL_Log("Closing physical gamepad...");
+		SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, false);
+		SDL_CloseGamepad(gamepad);
+		gamepad = NULL;
+	}
+	if (vigem_client) {
+		if (x360_pad) {
+			SDL_Log("Removing virtual controller...");
+			vigem_target_remove(vigem_client, x360_pad);
+			vigem_target_free(x360_pad);
+			x360_pad = NULL;
+		}
+		SDL_Log("Disconnecting from ViGEmBus...");
+		vigem_disconnect(vigem_client);
+		vigem_free(vigem_client);
+		vigem_client = NULL;
+	}
+
+	// 2. Reset state variables
+	gamepad_instance_id = 0;
+	gyro_data[0] = 0.0f; gyro_data[1] = 0.0f; gyro_data[2] = 0.0f;
+	isAiming = false;
+	always_on_gyro = false;
+	selected_button = -1;
+	selected_axis = -1;
+	sensitivity = 5.0f;
+	invert_gyro_x = false;
+	invert_gyro_y = false;
+
+	// 3. Re-initialize resources
+	SDL_Log("Re-initializing ViGEmBus...");
+	vigem_client = vigem_alloc();
+	if (vigem_client == NULL) {
+		SDL_Log("FATAL: Failed to re-allocate ViGEm client during reset.");
+		return false;
+	}
+	const VIGEM_ERROR ret = vigem_connect(vigem_client);
+	if (!VIGEM_SUCCESS(ret)) {
+		SDL_Log("FATAL: ViGEmBus re-connection failed: 0x%x.", ret);
+		return false;
+	}
+
+	x360_pad = vigem_target_x360_alloc();
+	vigem_target_set_vid(x360_pad, VIRTUAL_VENDOR_ID);
+	vigem_target_set_pid(x360_pad, VIRTUAL_PRODUCT_ID);
+
+	const VIGEM_ERROR add_ret = vigem_target_add(vigem_client, x360_pad);
+	if (!VIGEM_SUCCESS(add_ret)) {
+		SDL_Log("FATAL: Failed to re-add virtual X360 controller: 0x%x", add_ret);
+		return false;
+	}
+
+	// 4. Actively look for an already-connected controller
+	find_and_open_physical_gamepad();
+
+	SDL_Log("--- RESET COMPLETE ---");
+	return true;
+}
+
 
 /* This function runs once at startup. */
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
@@ -120,7 +234,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 		return SDL_APP_FAILURE;
 	}
 
-	if (!SDL_CreateWindowAndRenderer("Universal Gyro Aim", 450, 150, 0, &window, &renderer)) {
+	if (!SDL_CreateWindowAndRenderer("Universal Gyro Aim", 500, 160, 0, &window, &renderer)) {
 		SDL_Log("Couldn't create window and renderer: %s", SDL_GetError());
 		return SDL_APP_FAILURE;
 	}
@@ -166,19 +280,36 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			selected_axis = -1;
 			isAiming = false;
 			break;
+		case SDLK_T:
+			always_on_gyro = !always_on_gyro;
+			if (always_on_gyro) {
+				isAiming = false;
+			}
+			SDL_Log("Always-on gyro toggled %s.", always_on_gyro ? "ON" : "OFF");
+			break;
+		case SDLK_I:
+			invert_gyro_y = !invert_gyro_y;
+			SDL_Log("Invert Gyro Y-Axis (Pitch) toggled %s.", invert_gyro_y ? "ON" : "OFF");
+			break;
+		case SDLK_O:
+			invert_gyro_x = !invert_gyro_x;
+			SDL_Log("Invert Gyro X-Axis (Yaw) toggled %s.", invert_gyro_x ? "ON" : "OFF");
+			break;
+		case SDLK_R:
+			if (!reset_application()) {
+				return SDL_APP_SUCCESS;
+			}
+			break;
 		case SDLK_UP:
-			sensitivity_y += 0.5f;
-			sensitivity_x -= 0.5f;
-			SDL_Log("Sensitivity increased to X: %.2f, Y: %.2f", sensitivity_x, sensitivity_y);
+			sensitivity += 0.5f;
+			sensitivity = CLAMP(sensitivity, 0.5f, 50.0f);
+			SDL_Log("Sensitivity increased to %.2f", sensitivity);
 			break;
 		case SDLK_DOWN:
-			sensitivity_y -= 0.5f;
-			sensitivity_x += 0.5f;
-			SDL_Log("Sensitivity decreased to X: %.2f, Y: %.2f", sensitivity_x, sensitivity_y);
+			sensitivity -= 0.5f;
+			sensitivity = CLAMP(sensitivity, 0.5f, 50.0f);
+			SDL_Log("Sensitivity decreased to %.2f", sensitivity);
 			break;
-		case SDLK_Q:
-		case SDLK_ESCAPE:
-			return SDL_APP_SUCCESS;
 		}
 		break;
 
@@ -302,14 +433,12 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		report.sThumbRY = -SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
 	}
 
-	if (isAiming) {
-		const float FACTOR = 10000.0f;
+	if (isAiming || always_on_gyro) {
+		const float x_multiplier = invert_gyro_x ? 10000.0f : -10000.0f;
+		const float y_multiplier = invert_gyro_y ? -10000.0f : 10000.0f;
 
-		float stick_input_x = 0.0f;
-		float stick_input_y = 0.0f;
-
-		stick_input_x = gyro_data[1] * sensitivity_x * FACTOR;
-		stick_input_y = gyro_data[0] * sensitivity_y * FACTOR;
+		float stick_input_x = gyro_data[1] * sensitivity * x_multiplier;
+		float stick_input_y = gyro_data[0] * sensitivity * y_multiplier;
 
 		report.sThumbRX = (short)CLAMP(stick_input_x, -32767.0f, 32767.0f);
 		report.sThumbRY = (short)CLAMP(stick_input_y, -32767.0f, 32767.0f);
@@ -325,7 +454,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 	SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255);
 
 	if (!gamepad) {
-		const char* message = "Status: Waiting for physical controller...";
+		const char* message = "Waiting for physical controller...";
 		int w = 0, h = 0;
 		SDL_GetRenderOutputSize(renderer, &w, &h);
 		float x = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * SDL_strlen(message)) / 2.0f;
@@ -337,12 +466,18 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		float y_pos = 10.0f;
 		const float line_height = (float)(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 4);
 
-		const char* status_message = "Status: OK";
-		if (isAiming) {
+		const char* status_message;
+		if (always_on_gyro) {
+			status_message = "Status: Gyro Always ON";
+		}
+		else if (isAiming) {
 			status_message = "Status: Aiming with Gyro...";
 		}
+		else {
+			status_message = "Status: OK";
+		}
 		SDL_RenderDebugText(renderer, 10, y_pos, status_message);
-		y_pos += line_height * 2;
+		y_pos += line_height;
 
 		if (selected_button != -1) {
 			snprintf(buffer, sizeof(buffer), "Aim Button: %s", SDL_GetGamepadStringForButton(selected_button));
@@ -351,22 +486,35 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 			snprintf(buffer, sizeof(buffer), "Aim Trigger: %s", SDL_GetGamepadStringForAxis(selected_axis));
 		}
 		else {
-			snprintf(buffer, sizeof(buffer), "Aim Button: [Press a button/trigger to set]");
+			snprintf(buffer, sizeof(buffer), "Aim Button: [Press 'C' then a button/trigger]");
 		}
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height;
 
-		snprintf(buffer, sizeof(buffer), "Sensitivity: %.1f", sensitivity_y);
+		snprintf(buffer, sizeof(buffer), "Sensitivity: %.1f", sensitivity);
+		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
+		y_pos += line_height;
+
+		snprintf(buffer, sizeof(buffer), "Invert Gyro -> X-Axis: %s | Y-Axis: %s",
+			invert_gyro_x ? "ON" : "OFF",
+			invert_gyro_y ? "ON" : "OFF");
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height * 2;
+
 
 		SDL_RenderDebugText(renderer, 10, y_pos, "--- Controls ---");
 		y_pos += line_height;
 		SDL_RenderDebugText(renderer, 10, y_pos, " 'C' key:          Change Aim Button");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " Up/Down Arrows:   Adjust Sensitivity");
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'T' key:          Toggle Always-On Gyro");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'Esc' or 'Q' key: Quit");
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'I' key:          Invert Gyro Y-Axis");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'O' key:          Invert Gyro X-Axis");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'R' key:          Reset Application");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, " Up/Down Arrows:   Adjust Sensitivity");
 
 		// --- Gyro Visualizer ---
 		int w, h;
@@ -374,7 +522,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 		// Position the visualizer at the bottom right
 		const int centerX = w - 80;
-		const int centerY = h - 80;
+		const int centerY = h - 90;
 		const int outerRadius = 50;
 		const int innerRadius = 5;
 		const float visualizerScale = 20.0f;
@@ -384,8 +532,10 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		DrawCircle(renderer, centerX, centerY, outerRadius);
 
 		// Calculate dot position based on raw gyro input
-		float dotX_offset = -gyro_data[1] * visualizerScale;
-		float dotY_offset = -gyro_data[0] * visualizerScale;
+		const float x_multiplier = invert_gyro_x ? 1.0f : -1.0f;
+		const float y_multiplier = invert_gyro_y ? -1.0f : 1.0f;
+		float dotX_offset = gyro_data[1] * visualizerScale * x_multiplier;
+		float dotY_offset = -gyro_data[0] * visualizerScale * y_multiplier;
 
 		// Clamp the dot to be within the outer circle
 		float distance = sqrtf(dotX_offset * dotX_offset + dotY_offset * dotY_offset);
@@ -398,7 +548,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		int dotY = centerY + (int)dotY_offset;
 
 		// Change color if aiming
-		if (isAiming) {
+		if (isAiming || always_on_gyro) {
 			SDL_SetRenderDrawColor(renderer, 255, 80, 80, 255); // Red when aiming
 		}
 		else {
