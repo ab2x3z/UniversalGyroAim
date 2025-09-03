@@ -1,8 +1,0 @@
-﻿C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppBuild.targets(538,5): warning MSB8028: The intermediate directory (x64\Debug\) contains files shared from another project (UniversalGyroInput.vcxproj).  This can lead to incorrect clean and rebuild behavior.
-  UGA.c
-  ViGEmClient.lib(ViGEmClient.obj) : MSIL .netmodule or module compiled with /GL found; restarting link with /LTCG; add /LTCG to the link command line to improve linker performance
-LINK : warning LNK4075: ignoring '/INCREMENTAL' due to '/LTCG' specification
-     Creating library C:\Users\zab2x\Documents\Git-Fork\UniversalGyroAim\x64\Debug\UniversalGyroAim.lib and object C:\Users\zab2x\Documents\Git-Fork\UniversalGyroAim\x64\Debug\UniversalGyroAim.exp
-  Generating code
-  Finished generating code
-  UniversalGyroInput.vcxproj -> C:\Users\zab2x\Documents\Git-Fork\UniversalGyroAim\x64\Debug\UniversalGyroAim.exe
