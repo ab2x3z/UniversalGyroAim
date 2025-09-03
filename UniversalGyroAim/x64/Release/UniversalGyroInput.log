@@ -1,0 +1,9 @@
+﻿C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppBuild.targets(538,5): warning MSB8028: The intermediate directory (x64\Release\) contains files shared from another project (UniversalGyroInput.vcxproj).  This can lead to incorrect clean and rebuild behavior.
+  UGA.c
+     Creating library C:\Users\zab2x\Documents\Git-Fork\UniversalGyroInput\x64\Release\UniversalGyroAim.lib and object C:\Users\zab2x\Documents\Git-Fork\UniversalGyroInput\x64\Release\UniversalGyroAim.exp
+  Previous IPDB not found, fall back to full compilation.
+LINK : warning LNK4098: defaultlib 'LIBCMT' conflicts with use of other libs; use /NODEFAULTLIB:library
+  Generating code
+  All 78 functions were compiled because no usable IPDB/IOBJ from previous compilation was found.
+  Finished generating code
+  UniversalGyroInput.vcxproj -> C:\Users\zab2x\Documents\Git-Fork\UniversalGyroInput\x64\Release\UniversalGyroAim.exe
