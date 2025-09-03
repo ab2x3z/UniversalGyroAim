@@ -35,6 +35,81 @@ static SDL_GamepadAxis selected_axis = -1;
 static float sensitivity_x = -5.0f;
 static float sensitivity_y = 5.0f;
 
+
+// --- Drawing Helper Functions ---
+
+/**
+ * @brief Draws the outline of a circle using the Midpoint circle algorithm.
+ */
+void DrawCircle(SDL_Renderer* renderer, int centreX, int centreY, int radius)
+{
+	const int32_t diameter = (radius * 2);
+
+	int32_t x = (radius - 1);
+	int32_t y = 0;
+	int32_t tx = 1;
+	int32_t ty = 1;
+	int32_t error = (tx - diameter);
+
+	while (x >= y) {
+		// Each of the following renders an octant of the circle
+		SDL_RenderPoint(renderer, centreX + x, centreY - y);
+		SDL_RenderPoint(renderer, centreX + x, centreY + y);
+		SDL_RenderPoint(renderer, centreX - x, centreY - y);
+		SDL_RenderPoint(renderer, centreX - x, centreY + y);
+		SDL_RenderPoint(renderer, centreX + y, centreY - x);
+		SDL_RenderPoint(renderer, centreX + y, centreY + x);
+		SDL_RenderPoint(renderer, centreX - y, centreY - x);
+		SDL_RenderPoint(renderer, centreX - y, centreY + x);
+
+		if (error <= 0) {
+			++y;
+			error += ty;
+			ty += 2;
+		}
+
+		if (error > 0) {
+			--x;
+			tx += 2;
+			error += (tx - diameter);
+		}
+	}
+}
+
+/**
+ * @brief Draws a filled circle by rendering horizontal lines.
+ */
+void DrawFilledCircle(SDL_Renderer* renderer, int x, int y, int radius)
+{
+	int offsetx, offsety, d;
+
+	offsetx = 0;
+	offsety = radius;
+	d = radius - 1;
+
+	while (offsety >= offsetx) {
+		SDL_RenderLine(renderer, x - offsety, y + offsetx, x + offsety, y + offsetx);
+		SDL_RenderLine(renderer, x - offsetx, y + offsety, x + offsetx, y + offsety);
+		SDL_RenderLine(renderer, x - offsetx, y - offsety, x + offsetx, y - offsety);
+		SDL_RenderLine(renderer, x - offsety, y - offsetx, x + offsety, y - offsetx);
+
+		if (d >= 2 * offsetx) {
+			d -= 2 * offsetx + 1;
+			offsetx++;
+		}
+		else if (d < 2 * (radius - offsety)) {
+			d += 2 * offsety - 1;
+			offsety--;
+		}
+		else {
+			d += 2 * (offsety - offsetx - 1);
+			offsety--;
+			offsetx++;
+		}
+	}
+}
+
+
 /* This function runs once at startup. */
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 {
@@ -45,7 +120,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 		return SDL_APP_FAILURE;
 	}
 
-	if (!SDL_CreateWindowAndRenderer("Universal Gyro Aim", 500, 250, SDL_WINDOW_RESIZABLE, &window, &renderer)) {
+	if (!SDL_CreateWindowAndRenderer("Universal Gyro Aim", 450, 150, 0, &window, &renderer)) {
 		SDL_Log("Couldn't create window and renderer: %s", SDL_GetError());
 		return SDL_APP_FAILURE;
 	}
@@ -235,7 +310,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 		stick_input_x = gyro_data[1] * sensitivity_x * FACTOR;
 		stick_input_y = gyro_data[0] * sensitivity_y * FACTOR;
-		
+
 		report.sThumbRX = (short)CLAMP(stick_input_x, -32767.0f, 32767.0f);
 		report.sThumbRY = (short)CLAMP(stick_input_y, -32767.0f, 32767.0f);
 	}
@@ -292,6 +367,45 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		SDL_RenderDebugText(renderer, 10, y_pos, " Up/Down Arrows:   Adjust Sensitivity");
 		y_pos += line_height;
 		SDL_RenderDebugText(renderer, 10, y_pos, " 'Esc' or 'Q' key: Quit");
+
+		// --- Gyro Visualizer ---
+		int w, h;
+		SDL_GetRenderOutputSize(renderer, &w, &h);
+
+		// Position the visualizer at the bottom right
+		const int centerX = w - 80;
+		const int centerY = h - 80;
+		const int outerRadius = 50;
+		const int innerRadius = 5;
+		const float visualizerScale = 20.0f;
+
+		// Draw the outer boundary circle
+		SDL_SetRenderDrawColor(renderer, 100, 100, 120, 255);
+		DrawCircle(renderer, centerX, centerY, outerRadius);
+
+		// Calculate dot position based on raw gyro input
+		float dotX_offset = -gyro_data[1] * visualizerScale;
+		float dotY_offset = -gyro_data[0] * visualizerScale;
+
+		// Clamp the dot to be within the outer circle
+		float distance = sqrtf(dotX_offset * dotX_offset + dotY_offset * dotY_offset);
+		if (distance > outerRadius) {
+			dotX_offset = (dotX_offset / distance) * outerRadius;
+			dotY_offset = (dotY_offset / distance) * outerRadius;
+		}
+
+		int dotX = centerX + (int)dotX_offset;
+		int dotY = centerY + (int)dotY_offset;
+
+		// Change color if aiming
+		if (isAiming) {
+			SDL_SetRenderDrawColor(renderer, 255, 80, 80, 255); // Red when aiming
+		}
+		else {
+			SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255); // Default color
+		}
+
+		DrawFilledCircle(renderer, dotX, dotY, innerRadius);
 	}
 
 	SDL_RenderPresent(renderer);
