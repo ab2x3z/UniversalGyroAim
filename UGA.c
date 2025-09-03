@@ -569,6 +569,15 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		SDL_SetRenderDrawColor(renderer, 100, 100, 120, 255);
 		DrawCircle(renderer, centerX, centerY, outerRadius);
 
+		// Draw the anti-deadzone inner circle
+		if (anti_deathzone > 0.0f) {
+			int adzRadius = (int)(outerRadius * (anti_deathzone / 100.0f));
+			if (adzRadius > 0) {
+				SDL_SetRenderDrawColor(renderer, 60, 60, 80, 255);
+				DrawFilledCircle(renderer, centerX, centerY, adzRadius);
+			}
+		}
+
 		// Calculate dot position based on raw gyro input
 		const float x_multiplier = invert_gyro_x ? 1.0f : -1.0f;
 		const float y_multiplier = invert_gyro_y ? -1.0f : 1.0f;
