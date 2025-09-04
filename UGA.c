@@ -516,13 +516,13 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		const float x_multiplier = settings.invert_gyro_x ? 10000.0f : -10000.0f;
 		const float y_multiplier = settings.invert_gyro_y ? -10000.0f : 10000.0f;
 
-		float stick_input_x = gyro_data[1] * settings.sensitivity * x_multiplier;
-		float stick_input_y = gyro_data[0] * settings.sensitivity * y_multiplier;
+		float gyro_input_x = gyro_data[1] * settings.sensitivity * x_multiplier;
+		float gyro_input_y = gyro_data[0] * settings.sensitivity * y_multiplier;
 
 		// --- Apply Anti-Deadzone ---
 		if (settings.anti_deathzone > 0.0f) {
 			const float max_stick_val = 32767.0f;
-			float magnitude = sqrtf(stick_input_x * stick_input_x + stick_input_y * stick_input_y);
+			float magnitude = sqrtf(gyro_input_x * gyro_input_x + gyro_input_y * gyro_input_y);
 
 			if (magnitude > 0.01f) {
 				float normalized_mag = magnitude / max_stick_val;
@@ -533,14 +533,18 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 					float new_normalized_mag = dz_fraction + (1.0f - dz_fraction) * normalized_mag;
 
 					float scale_factor = new_normalized_mag / normalized_mag;
-					stick_input_x *= scale_factor;
-					stick_input_y *= scale_factor;
+					gyro_input_x *= scale_factor;
+					gyro_input_y *= scale_factor;
 				}
 			}
 		}
 
-		report.sThumbRX = (short)CLAMP(stick_input_x, -32767.0f, 32767.0f);
-		report.sThumbRY = (short)CLAMP(stick_input_y, -32767.0f, 32767.0f);
+		// --- Combine Gyro and Stick Inputs ---
+		float combined_x = (float)report.sThumbRX + gyro_input_x;
+		float combined_y = (float)report.sThumbRY + gyro_input_y;
+
+		report.sThumbRX = (short)CLAMP(combined_x, -32767.0f, 32767.0f);
+		report.sThumbRY = (short)CLAMP(combined_y, -32767.0f, 32767.0f);
 	}
 
 	if (x360_pad && vigem_client) {
