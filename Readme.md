@@ -25,4 +25,4 @@ To use this application, you **must** have the ViGEmBus driver installed on your
 
 ## License
 
-The code for this project (`UGI.c`) is provided as-is. The included ViGEmClient library is distributed under the MIT License.
+The code for this project (`UGA.c`) is provided as-is. The included ViGEmClient library is distributed under the MIT License.
