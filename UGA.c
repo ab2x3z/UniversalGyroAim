@@ -512,6 +512,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 {
 	XUSB_REPORT report;
 	XUSB_REPORT_INIT(&report);
+	bool stick_in_use = false;
 
 	if (gamepad) {
 		// --- Passthrough physical controller state to virtual controller ---
@@ -545,9 +546,17 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		report.sThumbLY = -SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTY);
 		report.sThumbRX = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
 		report.sThumbRY = -SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
+
+		// --- Check for Stick Priority ---
+		const float stick_deadzone = 8000.0f;
+		float stick_magnitude = sqrtf((float)report.sThumbRX * report.sThumbRX + (float)report.sThumbRY * report.sThumbRY);
+		if (stick_magnitude >= stick_deadzone) {
+			stick_in_use = true;
+		}
 	}
 
-	if (isAiming || settings.always_on_gyro) {
+	// --- Gyro Input Logic ---
+	if ((isAiming || settings.always_on_gyro) && !stick_in_use) {
 		const float x_multiplier = settings.invert_gyro_x ? 10000.0f : -10000.0f;
 		const float y_multiplier = settings.invert_gyro_y ? -10000.0f : 10000.0f;
 
@@ -561,12 +570,9 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 			if (magnitude > 0.01f) {
 				float normalized_mag = magnitude / max_stick_val;
-
 				if (normalized_mag <= 1.0f) {
 					float dz_fraction = settings.anti_deathzone / 100.0f;
-
 					float new_normalized_mag = dz_fraction + (1.0f - dz_fraction) * normalized_mag;
-
 					float scale_factor = new_normalized_mag / normalized_mag;
 					gyro_input_x *= scale_factor;
 					gyro_input_y *= scale_factor;
@@ -605,7 +611,10 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		const float line_height = (float)(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 4);
 
 		const char* status_message;
-		if (settings.always_on_gyro) {
+		if (stick_in_use && (isAiming || settings.always_on_gyro)) {
+			status_message = "Status: Stick Priority Active";
+		}
+		else if (settings.always_on_gyro) {
 			status_message = "Status: Gyro Always ON";
 		}
 		else if (isAiming) {
@@ -704,7 +713,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		int dotY = centerY + (int)dotY_offset;
 
 		// Change color if aiming
-		if (isAiming || settings.always_on_gyro) {
+		if ((isAiming || settings.always_on_gyro) && !stick_in_use) {
 			SDL_SetRenderDrawColor(renderer, 255, 80, 80, 255); // Red when aiming
 		}
 		else {
