@@ -292,6 +292,11 @@ static bool reset_application(void)
 	// 4. Actively look for an already-connected controller
 	find_and_open_physical_gamepad();
 
+	// 5. Load settings from file (or use defaults)
+	if (!LoadSettings()) {
+		SetDefaultSettings();
+	}
+
 	SDL_Log("--- RESET COMPLETE ---");
 	return true;
 }
