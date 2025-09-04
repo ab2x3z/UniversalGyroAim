@@ -45,6 +45,8 @@ static PVIGEM_TARGET x360_pad = NULL;
 static float gyro_data[3] = { 0.0f, 0.0f, 0.0f };
 static bool isAiming = false;
 
+static bool is_switch_pro_controller = false;
+
 // User configuration instance
 static AppSettings settings;
 
@@ -205,10 +207,19 @@ static void find_and_open_physical_gamepad(void)
 				SDL_CloseGamepad(temp_pad);
 			}
 			else {
+				const char* name = SDL_GetGamepadName(temp_pad);
 				// Found a valid physical controller
 				gamepad = temp_pad;
 				gamepad_instance_id = instance_id;
-				SDL_Log("Opened gamepad: %s (VID: %04X, PID: %04X)", SDL_GetGamepadName(gamepad), vendor, product);
+				SDL_Log("Opened gamepad: %s (VID: %04X, PID: %04X)", name, vendor, product);
+
+				if (SDL_strstr(name, "Pro Controller")) {
+					is_switch_pro_controller = true;
+					SDL_Log("Detected Nintendo Switch Pro Controller. Triggers will be digital (255/0).");
+				}
+				else {
+					is_switch_pro_controller = false;
+				}
 
 				if (SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, true) < 0) {
 					SDL_Log("Could not enable gyroscope: %s", SDL_GetError());
@@ -234,6 +245,7 @@ static bool reset_application(void)
 		SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, false);
 		SDL_CloseGamepad(gamepad);
 		gamepad = NULL;
+		is_switch_pro_controller = false;
 	}
 	if (vigem_client) {
 		if (x360_pad) {
@@ -402,6 +414,7 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 
 		Uint16 vendor = SDL_GetGamepadVendor(temp_pad);
 		Uint16 product = SDL_GetGamepadProduct(temp_pad);
+		const char* name = SDL_GetGamepadName(temp_pad);
 
 		// Check if the detected gamepad is our own virtual one
 		if (vendor == VIRTUAL_VENDOR_ID && product == VIRTUAL_PRODUCT_ID) {
@@ -411,7 +424,16 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 		else if (!gamepad) {
 			gamepad = temp_pad;
 			gamepad_instance_id = event->gdevice.which;
-			SDL_Log("Opened gamepad: %s (VID: %04X, PID: %04X)", SDL_GetGamepadName(gamepad), vendor, product);
+			SDL_Log("Opened gamepad: %s (VID: %04X, PID: %04X)", name, vendor, product);
+
+			if (SDL_strstr(name, "Pro Controller")) {
+				is_switch_pro_controller = true;
+				SDL_Log("Detected Nintendo Switch Pro Controller. Triggers will be digital (255/0).");
+			}
+			else {
+				is_switch_pro_controller = false;
+			}
+
 			if (SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, true) < 0) {
 				SDL_Log("Could not enable gyroscope: %s", SDL_GetError());
 			}
@@ -432,6 +454,7 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, false);
 			SDL_CloseGamepad(gamepad);
 			gamepad = NULL;
+			is_switch_pro_controller = false;
 			// Reset aiming state on disconnect
 			settings.selected_button = -1;
 			settings.selected_axis = -1;
@@ -503,8 +526,15 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) report.wButtons |= XUSB_GAMEPAD_DPAD_RIGHT;
 		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_GUIDE)) report.wButtons |= XUSB_GAMEPAD_GUIDE;
 
-		report.bLeftTrigger = (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) + 32768) / 257;
-		report.bRightTrigger = (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) + 32768) / 257;
+		// --- Trigger Passthrough Logic ---
+		if (is_switch_pro_controller) {
+			report.bLeftTrigger = (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 1000) ? 255 : 0;
+			report.bRightTrigger = (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 1000) ? 255 : 0;
+		}
+		else {
+			report.bLeftTrigger = (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) + 32768) / 257;
+			report.bRightTrigger = (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) + 32768) / 257;
+		}
 
 		report.sThumbLX = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTX);
 		report.sThumbLY = -SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTY);
