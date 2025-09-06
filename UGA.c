@@ -614,7 +614,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 			snprintf(buffer, sizeof(buffer), "Aim Trigger: %s", SDL_GetGamepadStringForAxis(settings.selected_axis));
 		}
 		else {
-			snprintf(buffer, sizeof(buffer), "Aim Button: [Press 'C' then a button/trigger]");
+			snprintf(buffer, sizeof(buffer), "Aim Button: [Press a button/trigger]");
 		}
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height;
