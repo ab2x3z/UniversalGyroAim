@@ -17,7 +17,7 @@ To use this application, you **must** have the ViGEmBus driver installed on your
 ## How to Use
 
 1.  Ensure you have met the requirements listed above.
-2.  Download the `UniversalGyroAim.exe` file from the `releases` folder.
+2.  Download the latest [release](https://github.com/ab2x3z/UniversalGyroAim/releases).
 3.  Connect your physical controller to your computer.
 4.  Run `UniversalGyroAim.exe`. A small window will open.
 5.  The application will wait for a physical controller to be connected. Once detected, its status will be displayed in the window.
