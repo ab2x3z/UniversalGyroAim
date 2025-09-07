@@ -10,6 +10,14 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600 
+#endif
+
+#include <shlwapi.h>
+#pragma comment(lib, "shlwapi.lib")
+#include <ShlObj.h> /
+
 #define CLAMP(v, min, max) (((v) < (min)) ? (min) : (((v) > (max)) ? (max) : (v)))
 
 // --- Custom identifiers for our virtual controller ---
@@ -47,6 +55,11 @@ static bool isAiming = false;
 
 // User configuration instance
 static AppSettings settings;
+
+// --- HidHide State ---
+static bool is_controller_hidden = false;
+static wchar_t hidden_device_instance_path[MAX_PATH] = { 0 };
+static wchar_t hid_hide_cli_path[MAX_PATH] = { 0 };
 
 
 // --- Settings Management Functions ---
@@ -104,6 +117,242 @@ static bool LoadSettings(void) {
 	settings = loaded_settings;
 	SDL_Log("Settings loaded successfully from %s.", CONFIG_FILENAME);
 	return true;
+}
+
+
+// --- HidHide Helper Functions ---
+
+/**
+ * @brief Executes a command-line process silently and waits for it to complete.
+ * @param command The full command line to execute.
+ * @return True if the command executed and returned an exit code of 0, otherwise false.
+ */
+static bool ExecuteCommand(const wchar_t* command)
+{
+	STARTUPINFOW si;
+	PROCESS_INFORMATION pi;
+	DWORD exit_code = 1; // Default to error
+
+	ZeroMemory(&si, sizeof(si));
+	si.cb = sizeof(si);
+	ZeroMemory(&pi, sizeof(pi));
+
+	// CreateProcessW requires a mutable string buffer
+	wchar_t* cmd_mutable = _wcsdup(command);
+	if (!cmd_mutable) {
+		SDL_Log("Failed to allocate memory for command.");
+		return false;
+	}
+
+	// Create the process with no visible window
+	if (CreateProcessW(NULL, cmd_mutable, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+		// Wait until the child process exits
+		WaitForSingleObject(pi.hProcess, INFINITE);
+		GetExitCodeProcess(pi.hProcess, &exit_code);
+
+		// Close process and thread handles
+		CloseHandle(pi.hProcess);
+		CloseHandle(pi.hThread);
+	}
+	else {
+		SDL_Log("CreateProcess failed (%lu) for command: %ls", GetLastError(), command);
+	}
+
+	free(cmd_mutable);
+
+	if (exit_code != 0) {
+		SDL_Log("Command returned non-zero exit code %lu.", exit_code);
+	}
+
+	return (exit_code == 0);
+}
+
+/**
+ * @brief Converts an SDL Device Path (Symbolic Link) to a Windows Device Instance Path.
+ * @param symbolic_link The path from SDL_GetGamepadPath.
+ * @return A newly allocated char buffer with the converted path, or NULL on failure. The caller must free this buffer.
+ */
+static char* ConvertSymbolicLinkToDeviceInstancePath(const char* symbolic_link)
+{
+	if (!symbolic_link) return NULL;
+
+	// Example Symbolic Link: \\?\HID#VID_054C&PID_09CC&MI_03#8&237c9acc&0&0000#{...GUID...}
+	// Desired Instance Path: HID\VID_054C&PID_09CC&MI_03\8&237c9acc&0&0000
+
+	// Find the start of the relevant part (skip \\?\)
+	const char* start = strstr(symbolic_link, "HID#");
+	if (!start) start = strstr(symbolic_link, "USB#"); // Also handle plain USB devices if needed
+	if (!start) {
+		SDL_Log("Could not find start of instance path in symbolic link.");
+		return NULL;
+	}
+
+	// Find the end of the relevant part (the first '{' of the GUID)
+	const char* end = strstr(start, "#{");
+	if (!end) {
+		SDL_Log("Could not find end of instance path in symbolic link.");
+		return NULL;
+	}
+
+	// Allocate memory for the new string
+	size_t len = end - start;
+	char* instance_path = (char*)malloc(len + 1);
+	if (!instance_path) {
+		SDL_Log("Failed to allocate memory for instance path.");
+		return NULL;
+	}
+
+	// Copy the relevant part
+	strncpy_s(instance_path, len + 1, start, len);
+
+	// Replace the first two '#' characters with '\'
+	char* first_hash = strchr(instance_path, '#');
+	if (first_hash) {
+		*first_hash = '\\';
+		char* second_hash = strchr(first_hash + 1, '#');
+		if (second_hash) {
+			*second_hash = '\\';
+		}
+	}
+
+	return instance_path;
+}
+
+static bool GetHidHideCliPath(wchar_t* cli_path, size_t cli_path_size)
+{
+	// --- Check the cache first ---
+	if (hid_hide_cli_path[0] != L'\0') {
+		wcscpy_s(cli_path, cli_path_size, hid_hide_cli_path);
+		return true;
+
+	}
+
+	// --- Scan common 'Program Files' directories ---
+
+	// List of known folder IDs for Program Files
+	const KNOWNFOLDERID* folder_ids[] = {
+		&FOLDERID_ProgramFiles,
+		&FOLDERID_ProgramFilesX86
+	};
+
+	// List of known sub-paths where HidHide might be installed
+	const wchar_t* sub_paths[] = {
+		L"Nefarius Software Solutions\\HidHide\\x64",
+		L"Nefarius Software Solutions\\HidHide",
+		L"Nefarius\\HidHide",
+		L"HidHide"
+	};
+
+	wchar_t* program_files_path = NULL;
+	for (int i = 0; i < sizeof(folder_ids) / sizeof(folder_ids[0]); ++i) {
+		if (SUCCEEDED(SHGetKnownFolderPath(folder_ids[i], 0, NULL, &program_files_path))) {
+
+			for (int j = 0; j < sizeof(sub_paths) / sizeof(sub_paths[0]); ++j) {
+				wchar_t combined_path[MAX_PATH];
+				PathCombineW(combined_path, program_files_path, sub_paths[j]);
+
+				// Final check: does HidHideCLI.exe exist here?
+				PathCombineW(cli_path, combined_path, L"HidHideCLI.exe");
+
+				if (GetFileAttributesW(cli_path) != INVALID_FILE_ATTRIBUTES) {
+					SDL_Log("Found HidHideCLI.exe at: %ls", cli_path);
+					wcscpy_s(hid_hide_cli_path, MAX_PATH, cli_path); // Cache the found path
+					CoTaskMemFree(program_files_path); // Free the memory
+					return true; // Success!
+				}
+			}
+			CoTaskMemFree(program_files_path); // Free the memory
+		}
+	}
+
+	SDL_Log("Could not find HidHideCLI.exe in any known location.");
+	return false;
+}
+
+/**
+ * @brief Unhides the currently hidden physical controller using HidHideCLI.
+ */
+static void UnhidePhysicalController(void)
+{
+	if (!is_controller_hidden || hidden_device_instance_path[0] == L'\0') {
+		return;
+	}
+
+	wchar_t cli_path[MAX_PATH];
+	if (!GetHidHideCliPath(cli_path, MAX_PATH)) {
+		SDL_Log("Cannot unhide controller: HidHideCLI not found.");
+		return;
+	}
+
+	wchar_t command[1024];
+	swprintf_s(command, 1024, L"\"%s\" --dev-unhide \"%s\"", cli_path, hidden_device_instance_path);
+
+	SDL_Log("Attempting to unhide controller...");
+	if (ExecuteCommand(command)) {
+		SDL_Log("Physical controller successfully unhidden.");
+		is_controller_hidden = false;
+		hidden_device_instance_path[0] = L'\0';
+	}
+	else {
+		SDL_Log("Failed to unhide physical controller.");
+	}
+}
+
+static void HidePhysicalController(SDL_Gamepad* pad_to_hide)
+{
+	if (is_controller_hidden) {
+		SDL_Log("Controller is already hidden.");
+		return;
+	}
+	if (!pad_to_hide) {
+		SDL_Log("Error: Cannot hide a NULL gamepad pointer.");
+		return;
+	}
+
+	wchar_t cli_path[MAX_PATH];
+	if (!GetHidHideCliPath(cli_path, MAX_PATH)) {
+		SDL_Log("HidHide not found. Cannot hide controller.");
+		return;
+	}
+
+	wchar_t command[1024];
+
+	// --- Get the device instance path ---
+	const char* dev_path = ConvertSymbolicLinkToDeviceInstancePath(SDL_GetGamepadPath(pad_to_hide));
+	if (!dev_path) {
+		SDL_Log("Error: SDL_GetGamepadPath failed to return a path.");
+		return;
+	}
+
+	// Convert path from SDL to a wide string for the command line
+	if (MultiByteToWideChar(CP_UTF8, 0, dev_path, -1, hidden_device_instance_path, MAX_PATH) == 0) {
+		SDL_Log("Error: Failed to convert device path to wide string.");
+		SDL_free((void*)dev_path);
+		return;
+	}
+
+	// --- Send the command to hide the device ---
+	swprintf_s(command, 1024, L"\"%s\" --dev-hide \"%s\"", cli_path, hidden_device_instance_path);
+	SDL_Log("Hiding device: %s", dev_path);
+	SDL_free((void*)dev_path);
+
+	if (!ExecuteCommand(command)) {
+		SDL_Log("Failed to hide the device. It might already be hidden.");
+		hidden_device_instance_path[0] = L'\0';
+		return;
+	}
+
+	// --- Enable the HidHide service to make the rule active ---
+	swprintf_s(command, 1024, L"\"%s\" --enable", cli_path);
+	SDL_Log("Enabling HidHide service...");
+	if (ExecuteCommand(command)) {
+		SDL_Log("Successfully hid physical controller.");
+		is_controller_hidden = true;
+	}
+	else {
+		SDL_Log("Failed to enable HidHide service, but device may still be hidden.");
+		is_controller_hidden = true;
+	}
 }
 
 
@@ -207,11 +456,11 @@ static void find_and_open_physical_gamepad(void)
 			else {
 				const char* name = SDL_GetGamepadName(temp_pad);
 				// Found a valid physical controller
-				gamepad = temp_pad;
-				gamepad_instance_id = instance_id;
 				SDL_Log("Opened gamepad: %s (VID: %04X, PID: %04X)", name, vendor, product);
 
-				if (SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, true) < 0) {
+				HidePhysicalController(temp_pad);
+
+				if (SDL_SetGamepadSensorEnabled(temp_pad, SDL_SENSOR_GYRO, true) < 0) {
 					SDL_Log("Could not enable gyroscope: %s", SDL_GetError());
 				}
 				else {
@@ -232,6 +481,7 @@ static bool reset_application(void)
 	// 1. Cleanup existing resources
 	if (gamepad) {
 		SDL_Log("Closing physical gamepad...");
+		UnhidePhysicalController();
 		SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, false);
 		SDL_CloseGamepad(gamepad);
 		gamepad = NULL;
@@ -301,7 +551,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 		return SDL_APP_FAILURE;
 	}
 
-	if (!SDL_CreateWindowAndRenderer("Universal Gyro Aim", 460, 190, 0, &window, &renderer)) {
+	if (!SDL_CreateWindowAndRenderer("Universal Gyro Aim", 460, 220, 0, &window, &renderer)) {
 		SDL_Log("Couldn't create window and renderer: %s", SDL_GetError());
 		return SDL_APP_FAILURE;
 	}
@@ -346,6 +596,19 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 
 	case SDL_EVENT_KEY_DOWN:
 		switch (event->key.key) {
+		case SDLK_H:
+			if (gamepad) {
+				if (is_controller_hidden) {
+					UnhidePhysicalController();
+				}
+				else {
+					HidePhysicalController(gamepad);
+				}
+			}
+			else {
+				SDL_Log("No controller connected to hide/unhide.");
+			}
+			break;
 		case SDLK_C:
 			SDL_Log("Change aim button requested. Press a button or trigger on the gamepad.");
 			settings.selected_button = -1;
@@ -419,7 +682,7 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			gamepad = temp_pad;
 			gamepad_instance_id = event->gdevice.which;
 			SDL_Log("Opened gamepad: %s (VID: %04X, PID: %04X)", name, vendor, product);
-
+			HidePhysicalController(gamepad);
 			if (SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, true) < 0) {
 				SDL_Log("Could not enable gyroscope: %s", SDL_GetError());
 			}
@@ -437,6 +700,7 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 	case SDL_EVENT_GAMEPAD_REMOVED:
 		if (gamepad && event->gdevice.which == gamepad_instance_id) {
 			SDL_Log("Gamepad disconnected: %s", SDL_GetGamepadName(gamepad));
+			UnhidePhysicalController();
 			SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, false);
 			SDL_CloseGamepad(gamepad);
 			gamepad = NULL;
@@ -631,10 +895,16 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 			settings.invert_gyro_x ? "ON" : "OFF",
 			settings.invert_gyro_y ? "ON" : "OFF");
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
+		y_pos += line_height;
+
+		snprintf(buffer, sizeof(buffer), "HidHide status: %s", is_controller_hidden ? "Hidden" : "Visible");
+		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height * 2;
 
 
 		SDL_RenderDebugText(renderer, 10, y_pos, "--- Controls ---");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'H' key:       Toggle Hiding Controller");
 		y_pos += line_height;
 		SDL_RenderDebugText(renderer, 10, y_pos, " 'C' key:       Change Aim Button");
 		y_pos += line_height;
@@ -712,6 +982,8 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 void SDL_AppQuit(void* appstate, SDL_AppResult result)
 {
+	UnhidePhysicalController();
+
 	if (gamepad) {
 		SDL_CloseGamepad(gamepad);
 	}

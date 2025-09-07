@@ -2,7 +2,7 @@
 
 Universal Gyro Aim is a simple utility for Windows that captures gyro data from a physical gamepad and maps it to the right analog stick of a virtual Xbox 360 controller. This allows you to add motion-based aiming to games that support standard XInput controllers.
 
-The application uses the SDL3 library to read input from a wide range of physical controllers and the ViGEmBus driver to create the virtual Xbox 360 controller that games will recognize.
+The application uses the SDL3 library to read input from a wide range of physical controllers and the ViGEmBus driver to create the virtual Xbox 360 controller that games will recognize. To prevent double input issues, it also uses HidHide to conceal the physical controller from games.
 
 ## Disclaimer
 
@@ -10,18 +10,30 @@ Please note that this is a proof-of-concept project. The code is crude, unoptimi
 
 ## Requirements
 
-To use this application, you **must** have the ViGEmBus driver installed on your system. The virtual controller cannot be created without it.
+To use this application, you **must** have the following drivers installed and configured on your system:
 
--   Download and install the ViGEmBus driver version 1.22.0 from the [official releases page](https://github.com/ViGEm/ViGEmBus/releases).
+-   **ViGEmBus:** This driver is required to create the virtual controller.
+    -   Download and install ViGEmBus driver version 1.22.0 from the [official releases page](https://github.com/ViGEm/ViGEmBus/releases).
+-   **HidHide:** This driver is required to hide your physical controller from games, preventing double input.
+    -   Download and install the latest version of HidHide from the [official releases page](https://github.com/nefarius/HidHide/releases).
+    -   **IMPORTANT:** After installing, you must whitelist `UniversalGyroAim.exe` so it can access the hidden controller. See instructions below.
 
 ## How to Use
 
-1.  Ensure you have met the requirements listed above.
-2.  Download the latest [release](https://github.com/ab2x3z/UniversalGyroAim/releases).
-3.  Connect your physical controller to your computer.
-4.  Run `UniversalGyroAim.exe`. A small window will open.
-5.  The application will wait for a physical controller to be connected. Once detected, its status will be displayed in the window.
-6.  By default, no aim button is set. Follow the on-screen instructions to configure the application.
+1.  **Install the required drivers** from the links in the "Requirements" section.
+2.  **Configure HidHide:**
+    -   Open the **HidHide Configuration Client** from your Start Menu.
+    -   Go to the **"Applications"** tab.
+    -   Click the `+` icon to add an application.
+    -   Browse to and select `UniversalGyroAim.exe`.
+    -   Close the **HidHide Configuration Client**
+3.  **Download and Run:**
+    -   Download the latest [release](https://github.com/ab2x3z/UniversalGyroAim/releases).
+    -   Connect your physical controller to your computer.
+    -   Run `UniversalGyroAim.exe`. A small window will open.
+4.  **Configure:**
+    -   The application will detect your controller and attempt to hide it.
+    -   Follow the on-screen instructions and keyboard shortcuts displayed in the application window to configure your settings (e.g., set an aim button, adjust sensitivity).
 
 ## License
 
