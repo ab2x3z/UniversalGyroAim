@@ -59,6 +59,10 @@ static bool isAiming = false;
 // User configuration instance
 static AppSettings settings;
 
+// --- Driver Status ---
+static bool vigem_found = false;
+static bool hidhide_found = false;
+
 // --- HidHide State ---
 static bool is_controller_hidden = false;
 static wchar_t hidden_device_instance_path[MAX_PATH] = { 0 };
@@ -593,11 +597,13 @@ static bool reset_application(void)
 	vigem_client = vigem_alloc();
 	if (vigem_client == NULL) {
 		SDL_Log("FATAL: Failed to re-allocate ViGEm client during reset.");
+		vigem_found = false;
 		return false;
 	}
 	const VIGEM_ERROR ret = vigem_connect(vigem_client);
 	if (!VIGEM_SUCCESS(ret)) {
 		SDL_Log("FATAL: ViGEmBus re-connection failed: 0x%x.", ret);
+		vigem_found = false;
 		return false;
 	}
 
@@ -608,8 +614,10 @@ static bool reset_application(void)
 	const VIGEM_ERROR add_ret = vigem_target_add(vigem_client, x360_pad);
 	if (!VIGEM_SUCCESS(add_ret)) {
 		SDL_Log("FATAL: Failed to re-add virtual X360 controller: 0x%x", add_ret);
+		vigem_found = false;
 		return false;
 	}
+	vigem_found = true;
 
 	// 4. Actively look for an already-connected controller
 	find_and_open_physical_gamepad();
@@ -639,34 +647,47 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 		return SDL_APP_FAILURE;
 	}
 
-	// Don't lock the main thread to VSync, as it can cause input stutters
-	// if the event loop gets delayed. The mouse thread is fully independent.
-	// SDL_SetRenderVSync(renderer, 1);
+	// --- Check for HidHide driver early ---
+	wchar_t cli_path_buffer[MAX_PATH];
+	hidhide_found = GetHidHideCliPath(cli_path_buffer, MAX_PATH);
+	if (!hidhide_found) {
+		SDL_Log("Warning: HidHide driver/CLI not found. Controller hiding will not be available.");
+	}
 
+	// --- Initialize ViGEmBus and check for driver ---
 	vigem_client = vigem_alloc();
 	if (vigem_client == NULL) {
 		SDL_Log("Error: Failed to allocate ViGEm client.");
 		return SDL_APP_FAILURE;
 	}
 	const VIGEM_ERROR ret = vigem_connect(vigem_client);
-	if (!VIGEM_SUCCESS(ret)) {
-		SDL_Log("Error: ViGEmBus connection failed: 0x%x. Is the driver installed?", ret);
-		return SDL_APP_FAILURE;
+	if (ret == VIGEM_ERROR_BUS_NOT_FOUND) {
+		SDL_Log("CRITICAL: ViGEmBus driver not found. The application cannot create a virtual controller.");
+		vigem_found = false;
 	}
-
-	x360_pad = vigem_target_x360_alloc();
-
-	// Set a custom VID/PID to distinguish our virtual controller from real ones
-	vigem_target_set_vid(x360_pad, VIRTUAL_VENDOR_ID);
-	vigem_target_set_pid(x360_pad, VIRTUAL_PRODUCT_ID);
-
-	const VIGEM_ERROR add_ret = vigem_target_add(vigem_client, x360_pad);
-	if (!VIGEM_SUCCESS(add_ret)) {
-		SDL_Log("Error: Failed to add virtual X360 controller: 0x%x", add_ret);
-		return SDL_APP_FAILURE;
+	else if (!VIGEM_SUCCESS(ret)) {
+		SDL_Log("Error: ViGEmBus connection failed with code: 0x%x.", ret);
+		vigem_found = false;
 	}
+	else {
+		vigem_found = true;
+		SDL_Log("Successfully connected to ViGEmBus driver.");
 
-	SDL_Log("App started. Virtual Xbox 360 controller is active.");
+		x360_pad = vigem_target_x360_alloc();
+
+		// Set a custom VID/PID to distinguish our virtual controller from real ones
+		vigem_target_set_vid(x360_pad, VIRTUAL_VENDOR_ID);
+		vigem_target_set_pid(x360_pad, VIRTUAL_PRODUCT_ID);
+
+		const VIGEM_ERROR add_ret = vigem_target_add(vigem_client, x360_pad);
+		if (!VIGEM_SUCCESS(add_ret)) {
+			SDL_Log("Error: Failed to add virtual X360 controller: 0x%x", add_ret);
+			vigem_found = false; // Treat this as a failure to have a working driver.
+		}
+		else {
+			SDL_Log("App started. Virtual Xbox 360 controller is active.");
+		}
+	}
 
 	if (!LoadSettings()) {
 		SetDefaultSettings();
@@ -989,13 +1010,32 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 	}
 
 
-	if (x360_pad && vigem_client) {
+	if (vigem_found && x360_pad && vigem_client) {
 		vigem_target_x360_update(vigem_client, x360_pad, report);
 	}
 
 	// --- Drawing UI ---
 	SDL_SetRenderDrawColor(renderer, 25, 25, 40, 255);
 	SDL_RenderClear(renderer);
+
+	// --- Handle Critical Errors ---
+	if (!vigem_found) {
+		SDL_SetRenderDrawColor(renderer, 255, 100, 100, 255);
+		const float line_height = (float)(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 4);
+		float y_pos = 10.0f;
+		SDL_RenderDebugText(renderer, 10, y_pos, "CRITICAL ERROR: Could not connect to ViGEmBus!");
+		y_pos += line_height * 2;
+		SDL_RenderDebugText(renderer, 10, y_pos, "The application cannot create a virtual controller.");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, "Please ensure the ViGEmBus driver is installed.");
+		y_pos += line_height * 2;
+		SDL_RenderDebugText(renderer, 10, y_pos, "Get it from: github.com/ViGEm/ViGEmBus/releases");
+
+		SDL_RenderPresent(renderer);
+		return SDL_APP_CONTINUE;
+	}
+
+	// --- Normal UI ---
 	SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255);
 
 	if (!gamepad) {
@@ -1070,7 +1110,19 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 		snprintf(buffer, sizeof(buffer), "HidHide status: %s", is_controller_hidden ? "Hidden" : "Visible");
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
-		y_pos += line_height * 2;
+		y_pos += line_height;
+
+		if (!hidhide_found) {
+			y_pos += line_height; // Extra space
+			SDL_SetRenderDrawColor(renderer, 255, 255, 100, 255); // Yellow
+			SDL_RenderDebugText(renderer, 10, y_pos, "Warning: HidHide not found.");
+			y_pos += line_height;
+			SDL_RenderDebugText(renderer, 10, y_pos, "You may experience double inputs in games.");
+			y_pos += line_height;
+			SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255); // Reset color
+		}
+
+		y_pos += line_height;
 
 
 		SDL_RenderDebugText(renderer, 10, y_pos, "--- Controls ---");
@@ -1089,7 +1141,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		y_pos += line_height;
 		SDL_RenderDebugText(renderer, 10, y_pos, " Up/Down:       Adjust Sensitivity");
 		y_pos += line_height;
-		if (!settings.mouse_mode){
+		if (!settings.mouse_mode) {
 			SDL_RenderDebugText(renderer, 10, y_pos, " Left/Right:    Adjust Anti-Deadzone");
 			y_pos += line_height;
 		}
