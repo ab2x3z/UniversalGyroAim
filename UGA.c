@@ -457,13 +457,15 @@ static void find_and_open_physical_gamepad(void)
 				SDL_CloseGamepad(temp_pad);
 			}
 			else {
-				const char* name = SDL_GetGamepadName(temp_pad);
+				gamepad = temp_pad;
+				gamepad_instance_id = instance_id;
+				const char* name = SDL_GetGamepadName(gamepad);
 				// Found a valid physical controller
 				SDL_Log("Opened gamepad: %s (VID: %04X, PID: %04X)", name, vendor, product);
 
-				HidePhysicalController(temp_pad);
+				HidePhysicalController(gamepad);
 
-				if (SDL_SetGamepadSensorEnabled(temp_pad, SDL_SENSOR_GYRO, true) < 0) {
+				if (SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, true) < 0) {
 					SDL_Log("Could not enable gyroscope: %s", SDL_GetError());
 				}
 				else {
