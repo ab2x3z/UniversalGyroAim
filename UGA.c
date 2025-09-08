@@ -1089,8 +1089,10 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		y_pos += line_height;
 		SDL_RenderDebugText(renderer, 10, y_pos, " Up/Down:       Adjust Sensitivity");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " Left/Right:    Adjust Anti-Deadzone");
-		y_pos += line_height;
+		if (!settings.mouse_mode){
+			SDL_RenderDebugText(renderer, 10, y_pos, " Left/Right:    Adjust Anti-Deadzone");
+			y_pos += line_height;
+		}
 		SDL_RenderDebugText(renderer, 10, y_pos, " 'S' key:       Save Settings");
 		y_pos += line_height;
 		SDL_RenderDebugText(renderer, 10, y_pos, " 'R' key:       Reset Application");
