@@ -38,6 +38,8 @@ typedef struct {
 	float anti_deathzone;
 	bool always_on_gyro;
 	int config_version;
+	bool mouse_mode;
+	float mouse_sensitivity;
 } AppSettings;
 
 // --- Global State ---
@@ -73,6 +75,8 @@ static void SetDefaultSettings(void) {
 	settings.invert_gyro_y = false;
 	settings.anti_deathzone = 0.0f;
 	settings.always_on_gyro = false;
+	settings.mouse_mode = false;
+	settings.mouse_sensitivity = 100.0f;
 	settings.config_version = CURRENT_CONFIG_VERSION;
 }
 
@@ -556,7 +560,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 		return SDL_APP_FAILURE;
 	}
 
-	if (!SDL_CreateWindowAndRenderer("Universal Gyro Aim", 460, 220, 0, &window, &renderer)) {
+	if (!SDL_CreateWindowAndRenderer("Universal Gyro Aim", 460, 240, 0, &window, &renderer)) {
 		SDL_Log("Couldn't create window and renderer: %s", SDL_GetError());
 		return SDL_APP_FAILURE;
 	}
@@ -629,6 +633,10 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			}
 			SDL_Log("Always-on gyro toggled %s.", settings.always_on_gyro ? "ON" : "OFF");
 			break;
+		case SDLK_M:
+			settings.mouse_mode = !settings.mouse_mode;
+			SDL_Log("Mouse mode toggled %s.", settings.mouse_mode ? "ON" : "OFF");
+			break;
 		case SDLK_I:
 			settings.invert_gyro_y = !settings.invert_gyro_y;
 			SDL_Log("Invert Gyro Y-Axis (Pitch) toggled %s.", settings.invert_gyro_y ? "ON" : "OFF");
@@ -646,24 +654,42 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			}
 			break;
 		case SDLK_UP:
-			settings.sensitivity += 0.5f;
-			settings.sensitivity = CLAMP(settings.sensitivity, 0.5f, 50.0f);
-			SDL_Log("Sensitivity increased to %.2f", settings.sensitivity);
+			if (settings.mouse_mode) {
+				settings.mouse_sensitivity += 10.0f;
+				settings.mouse_sensitivity = CLAMP(settings.mouse_sensitivity, 10.0f, 1000.0f);
+				SDL_Log("Mouse Sensitivity increased to %.1f", settings.mouse_sensitivity);
+			}
+			else {
+				settings.sensitivity += 0.5f;
+				settings.sensitivity = CLAMP(settings.sensitivity, 0.5f, 50.0f);
+				SDL_Log("Joystick Sensitivity increased to %.1f", settings.sensitivity);
+			}
 			break;
 		case SDLK_DOWN:
-			settings.sensitivity -= 0.5f;
-			settings.sensitivity = CLAMP(settings.sensitivity, 0.5f, 50.0f);
-			SDL_Log("Sensitivity decreased to %.2f", settings.sensitivity);
+			if (settings.mouse_mode) {
+				settings.mouse_sensitivity -= 10.0f;
+				settings.mouse_sensitivity = CLAMP(settings.mouse_sensitivity, 10.0f, 1000.0f);
+				SDL_Log("Mouse Sensitivity decreased to %.1f", settings.mouse_sensitivity);
+			}
+			else {
+				settings.sensitivity -= 0.5f;
+				settings.sensitivity = CLAMP(settings.sensitivity, 0.5f, 50.0f);
+				SDL_Log("Joystick Sensitivity decreased to %.1f", settings.sensitivity);
+			}
 			break;
 		case SDLK_RIGHT:
-			settings.anti_deathzone += 1.0f;
-			settings.anti_deathzone = CLAMP(settings.anti_deathzone, 0.0f, 90.0f);
-			SDL_Log("Anti-Deadzone increased to %.0f%%", settings.anti_deathzone);
+			if (!settings.mouse_mode) {
+				settings.anti_deathzone += 1.0f;
+				settings.anti_deathzone = CLAMP(settings.anti_deathzone, 0.0f, 90.0f);
+				SDL_Log("Anti-Deadzone increased to %.0f%%", settings.anti_deathzone);
+			}
 			break;
 		case SDLK_LEFT:
-			settings.anti_deathzone -= 1.0f;
-			settings.anti_deathzone = CLAMP(settings.anti_deathzone, 0.0f, 90.0f);
-			SDL_Log("Anti-Deadzone decreased to %.0f%%", settings.anti_deathzone);
+			if (!settings.mouse_mode) {
+				settings.anti_deathzone -= 1.0f;
+				settings.anti_deathzone = CLAMP(settings.anti_deathzone, 0.0f, 90.0f);
+				SDL_Log("Anti-Deadzone decreased to %.0f%%", settings.anti_deathzone);
+			}
 			break;
 		}
 		break;
@@ -809,35 +835,56 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 	// --- Gyro Input Logic ---
 	if ((isAiming || settings.always_on_gyro) && !stick_in_use) {
-		const float x_multiplier = settings.invert_gyro_x ? 10000.0f : -10000.0f;
-		const float y_multiplier = settings.invert_gyro_y ? -10000.0f : 10000.0f;
+		if (settings.mouse_mode) {
+			// --- MOUSE MODE ---
+			float deltaX = gyro_data[1] * settings.mouse_sensitivity * (settings.invert_gyro_x ? 1.0f : -1.0f);
+			float deltaY = gyro_data[0] * settings.mouse_sensitivity * (settings.invert_gyro_y ? 1.0f : -1.0f);
 
-		float gyro_input_x = gyro_data[1] * settings.sensitivity * x_multiplier;
-		float gyro_input_y = gyro_data[0] * settings.sensitivity * y_multiplier;
+			if (fabsf(deltaX) > 0.01f || fabsf(deltaY) > 0.01f) {
+				INPUT input = { 0 };
+				input.type = INPUT_MOUSE;
+				input.mi.dx = (LONG)deltaX;
+				input.mi.dy = (LONG)deltaY;
+				input.mi.dwFlags = MOUSEEVENTF_MOVE;
+				SendInput(1, &input, sizeof(INPUT));
+			}
 
-		// --- Apply Anti-Deadzone ---
-		if (settings.anti_deathzone > 0.0f) {
-			const float max_stick_val = 32767.0f;
-			float magnitude = sqrtf(gyro_input_x * gyro_input_x + gyro_input_y * gyro_input_y);
+			// Zero out the virtual stick in mouse mode to prevent interference.
+			report.sThumbRX = 0;
+			report.sThumbRY = 0;
+		}
+		else {
+			// --- JOYSTICK MODE ---
+			const float x_multiplier = settings.invert_gyro_x ? 10000.0f : -10000.0f;
+			const float y_multiplier = settings.invert_gyro_y ? -10000.0f : 10000.0f;
 
-			if (magnitude > 0.01f) {
-				float normalized_mag = magnitude / max_stick_val;
-				if (normalized_mag <= 1.0f) {
-					float dz_fraction = settings.anti_deathzone / 100.0f;
-					float new_normalized_mag = dz_fraction + (1.0f - dz_fraction) * normalized_mag;
-					float scale_factor = new_normalized_mag / normalized_mag;
-					gyro_input_x *= scale_factor;
-					gyro_input_y *= scale_factor;
+			float gyro_input_x = gyro_data[1] * settings.sensitivity * x_multiplier;
+			float gyro_input_y = gyro_data[0] * settings.sensitivity * y_multiplier;
+
+			// --- Apply Anti-Deadzone ---
+			if (settings.anti_deathzone > 0.0f) {
+				const float max_stick_val = 32767.0f;
+				float magnitude = sqrtf(gyro_input_x * gyro_input_x + gyro_input_y * gyro_input_y);
+
+				if (magnitude > 0.01f) {
+					float normalized_mag = magnitude / max_stick_val;
+					if (normalized_mag <= 1.0f) {
+						float dz_fraction = settings.anti_deathzone / 100.0f;
+						float new_normalized_mag = dz_fraction + (1.0f - dz_fraction) * normalized_mag;
+						float scale_factor = new_normalized_mag / normalized_mag;
+						gyro_input_x *= scale_factor;
+						gyro_input_y *= scale_factor;
+					}
 				}
 			}
+
+			// --- Combine Gyro and Stick Inputs ---
+			float combined_x = (float)report.sThumbRX + gyro_input_x;
+			float combined_y = (float)report.sThumbRY + gyro_input_y;
+
+			report.sThumbRX = (short)CLAMP(combined_x, -32767.0f, 32767.0f);
+			report.sThumbRY = (short)CLAMP(combined_y, -32767.0f, 32767.0f);
 		}
-
-		// --- Combine Gyro and Stick Inputs ---
-		float combined_x = (float)report.sThumbRX + gyro_input_x;
-		float combined_y = (float)report.sThumbRY + gyro_input_y;
-
-		report.sThumbRX = (short)CLAMP(combined_x, -32767.0f, 32767.0f);
-		report.sThumbRY = (short)CLAMP(combined_y, -32767.0f, 32767.0f);
 	}
 
 	if (x360_pad && vigem_client) {
@@ -863,17 +910,25 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		const float line_height = (float)(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 4);
 
 		const char* status_message;
-		if (stick_in_use && (isAiming || settings.always_on_gyro)) {
+		if (settings.mouse_mode) {
+			if ((isAiming || settings.always_on_gyro) && !stick_in_use) {
+				status_message = "Status: Aiming with Gyro (Mouse)";
+			}
+			else {
+				status_message = "Status: OK (Mouse Mode)";
+			}
+		}
+		else if (stick_in_use && (isAiming || settings.always_on_gyro)) {
 			status_message = "Status: Stick Priority Active";
 		}
 		else if (settings.always_on_gyro) {
-			status_message = "Status: Gyro Always ON";
+			status_message = "Status: Gyro Always ON (Joystick)";
 		}
 		else if (isAiming) {
-			status_message = "Status: Aiming with Gyro...";
+			status_message = "Status: Aiming with Gyro (Joystick)";
 		}
 		else {
-			status_message = "Status: OK";
+			status_message = "Status: OK (Joystick)";
 		}
 		SDL_RenderDebugText(renderer, 10, y_pos, status_message);
 		y_pos += line_height;
@@ -890,13 +945,20 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height;
 
-		snprintf(buffer, sizeof(buffer), "Sensitivity: %.1f", settings.sensitivity);
+		if (settings.mouse_mode) {
+			snprintf(buffer, sizeof(buffer), "Mouse Sensitivity: %.1f", settings.mouse_sensitivity);
+		}
+		else {
+			snprintf(buffer, sizeof(buffer), "Joystick Sensitivity: %.1f", settings.sensitivity);
+		}
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height;
 
-		snprintf(buffer, sizeof(buffer), "Anti-Deadzone: %.0f%%", settings.anti_deathzone);
-		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
-		y_pos += line_height;
+		if (!settings.mouse_mode) {
+			snprintf(buffer, sizeof(buffer), "Anti-Deadzone: %.0f%%", settings.anti_deathzone);
+			SDL_RenderDebugText(renderer, 10, y_pos, buffer);
+			y_pos += line_height;
+		}
 
 		snprintf(buffer, sizeof(buffer), "Invert Gyro -> X-Axis: %s | Y-Axis: %s",
 			settings.invert_gyro_x ? "ON" : "OFF",
@@ -910,6 +972,8 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 
 		SDL_RenderDebugText(renderer, 10, y_pos, "--- Controls ---");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, " 'M' key:       Toggle Mouse/Joystick Mode");
 		y_pos += line_height;
 		SDL_RenderDebugText(renderer, 10, y_pos, " 'H' key:       Toggle Hiding Controller");
 		y_pos += line_height;
@@ -945,8 +1009,8 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		SDL_SetRenderDrawColor(renderer, 100, 100, 120, 255);
 		DrawCircle(renderer, centerX, centerY, outerRadius);
 
-		// Draw the anti-deadzone inner circle
-		if (settings.anti_deathzone > 0.0f) {
+		// Draw the anti-deadzone inner circle (only in joystick mode)
+		if (!settings.mouse_mode && settings.anti_deathzone > 0.0f) {
 			int adzRadius = (int)(outerRadius * (settings.anti_deathzone / 100.0f));
 			if (adzRadius > 0) {
 				SDL_SetRenderDrawColor(renderer, 60, 60, 80, 255);
