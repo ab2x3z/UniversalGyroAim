@@ -17,6 +17,7 @@
 #include <shlwapi.h>
 #pragma comment(lib, "shlwapi.lib")
 #include <ShlObj.h> /
+#pragma comment(lib, "winmm.lib")
 
 #define CLAMP(v, min, max) (((v) < (min)) ? (min) : (((v) > (max)) ? (max) : (v)))
 
@@ -63,6 +64,75 @@ static bool is_controller_hidden = false;
 static wchar_t hidden_device_instance_path[MAX_PATH] = { 0 };
 static wchar_t hid_hide_cli_path[MAX_PATH] = { 0 };
 
+// --- Mouse Mode State (Shared between threads) ---
+static volatile bool run_mouse_thread = false;
+static HANDLE mouse_thread_handle = NULL;
+static CRITICAL_SECTION data_lock;
+static volatile float shared_gyro_data[3] = { 0.0f, 0.0f, 0.0f };
+static volatile bool shared_mouse_aim_active = false;
+
+
+// --- Mouse Thread for High-Frequency Input ---
+DWORD WINAPI MouseThread(LPVOID lpParam) {
+	float accumulator_x = 0.0f;
+	float accumulator_y = 0.0f;
+
+	Uint64 perf_freq = SDL_GetPerformanceFrequency();
+	Uint64 last_time = SDL_GetPerformanceCounter();
+
+	// Request higher timer resolution
+	timeBeginPeriod(1);
+
+	while (run_mouse_thread) {
+		// --- Calculate this thread's own, stable delta time ---
+		Uint64 current_time = SDL_GetPerformanceCounter();
+		float dt = (float)(current_time - last_time) / (float)perf_freq;
+		last_time = current_time;
+
+		// --- Read shared data ---
+		EnterCriticalSection(&data_lock);
+		float current_gyro_x = shared_gyro_data[0];
+		float current_gyro_y = shared_gyro_data[1];
+		bool is_active = shared_mouse_aim_active;
+		LeaveCriticalSection(&data_lock);
+
+		// --- Perform calculations inside this thread ---
+		if (is_active) {
+			float deltaX = current_gyro_y * dt * settings.mouse_sensitivity * (settings.invert_gyro_x ? 1.0f : -1.0f);
+			float deltaY = current_gyro_x * dt * settings.mouse_sensitivity * (settings.invert_gyro_y ? 1.0f : -1.0f);
+			accumulator_x += deltaX;
+			accumulator_y += deltaY;
+		}
+
+		// --- Dispatch mouse movement ---
+		LONG move_x = 0;
+		LONG move_y = 0;
+		if (fabsf(accumulator_x) >= 1.0f) {
+			move_x = (LONG)accumulator_x;
+			accumulator_x -= move_x;
+		}
+		if (fabsf(accumulator_y) >= 1.0f) {
+			move_y = (LONG)accumulator_y;
+			accumulator_y -= move_y;
+		}
+
+		if (move_x != 0 || move_y != 0) {
+			INPUT input = { 0 };
+			input.type = INPUT_MOUSE;
+			input.mi.dx = move_x;
+			input.mi.dy = move_y;
+			input.mi.dwFlags = MOUSEEVENTF_MOVE;
+			SendInput(1, &input, sizeof(INPUT));
+		}
+
+		Sleep(1);
+	}
+
+	// Release timer resolution
+	timeEndPeriod(1);
+	return 0;
+}
+
 
 // --- Settings Management Functions ---
 
@@ -76,7 +146,7 @@ static void SetDefaultSettings(void) {
 	settings.anti_deathzone = 0.0f;
 	settings.always_on_gyro = false;
 	settings.mouse_mode = false;
-	settings.mouse_sensitivity = 100.0f;
+	settings.mouse_sensitivity = 5000.0f;
 	settings.config_version = CURRENT_CONFIG_VERSION;
 }
 
@@ -510,6 +580,10 @@ static bool reset_application(void)
 
 	// 2. Reset state variables
 	gamepad_instance_id = 0;
+	EnterCriticalSection(&data_lock);
+	shared_gyro_data[0] = 0.0f; shared_gyro_data[1] = 0.0f; shared_gyro_data[2] = 0.0f;
+	shared_mouse_aim_active = false;
+	LeaveCriticalSection(&data_lock);
 	gyro_data[0] = 0.0f; gyro_data[1] = 0.0f; gyro_data[2] = 0.0f;
 	isAiming = false;
 	SetDefaultSettings();
@@ -565,7 +639,9 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 		return SDL_APP_FAILURE;
 	}
 
-	SDL_SetRenderVSync(renderer, 1);
+	// Don't lock the main thread to VSync, as it can cause input stutters
+	// if the event loop gets delayed. The mouse thread is fully independent.
+	// SDL_SetRenderVSync(renderer, 1);
 
 	vigem_client = vigem_alloc();
 	if (vigem_client == NULL) {
@@ -594,6 +670,18 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 
 	if (!LoadSettings()) {
 		SetDefaultSettings();
+	}
+
+	// --- Initialize and start the mouse thread ---
+	InitializeCriticalSection(&data_lock);
+	run_mouse_thread = true;
+	mouse_thread_handle = CreateThread(NULL, 0, MouseThread, NULL, 0, NULL);
+	if (mouse_thread_handle) {
+		SetThreadPriority(mouse_thread_handle, THREAD_PRIORITY_TIME_CRITICAL);
+	}
+	else {
+		SDL_Log("FATAL: Could not create mouse thread!");
+		return SDL_APP_FAILURE;
 	}
 
 	return SDL_APP_CONTINUE;
@@ -655,8 +743,8 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			break;
 		case SDLK_UP:
 			if (settings.mouse_mode) {
-				settings.mouse_sensitivity += 10.0f;
-				settings.mouse_sensitivity = CLAMP(settings.mouse_sensitivity, 10.0f, 1000.0f);
+				settings.mouse_sensitivity += 500.0f;
+				settings.mouse_sensitivity = CLAMP(settings.mouse_sensitivity, 100.0f, 20000.0f);
 				SDL_Log("Mouse Sensitivity increased to %.1f", settings.mouse_sensitivity);
 			}
 			else {
@@ -667,8 +755,8 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			break;
 		case SDLK_DOWN:
 			if (settings.mouse_mode) {
-				settings.mouse_sensitivity -= 10.0f;
-				settings.mouse_sensitivity = CLAMP(settings.mouse_sensitivity, 10.0f, 1000.0f);
+				settings.mouse_sensitivity -= 500.0f;
+				settings.mouse_sensitivity = CLAMP(settings.mouse_sensitivity, 100.0f, 20000.0f);
 				SDL_Log("Mouse Sensitivity decreased to %.1f", settings.mouse_sensitivity);
 			}
 			else {
@@ -776,6 +864,14 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 
 	case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
 		if (event->gsensor.sensor == SDL_SENSOR_GYRO) {
+			// Update the shared data for the mouse thread
+			EnterCriticalSection(&data_lock);
+			shared_gyro_data[0] = event->gsensor.data[0];
+			shared_gyro_data[1] = event->gsensor.data[1];
+			shared_gyro_data[2] = event->gsensor.data[2];
+			LeaveCriticalSection(&data_lock);
+
+			// Also update the local copy for the UI visualizer
 			gyro_data[0] = event->gsensor.data[0];
 			gyro_data[1] = event->gsensor.data[1];
 			gyro_data[2] = event->gsensor.data[2];
@@ -834,58 +930,64 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 	}
 
 	// --- Gyro Input Logic ---
-	if ((isAiming || settings.always_on_gyro) && !stick_in_use) {
-		if (settings.mouse_mode) {
-			// --- MOUSE MODE ---
-			float deltaX = gyro_data[1] * settings.mouse_sensitivity * (settings.invert_gyro_x ? 1.0f : -1.0f);
-			float deltaY = gyro_data[0] * settings.mouse_sensitivity * (settings.invert_gyro_y ? 1.0f : -1.0f);
+	bool gyro_is_active = (isAiming || settings.always_on_gyro) && !stick_in_use;
 
-			if (fabsf(deltaX) > 0.01f || fabsf(deltaY) > 0.01f) {
-				INPUT input = { 0 };
-				input.type = INPUT_MOUSE;
-				input.mi.dx = (LONG)deltaX;
-				input.mi.dy = (LONG)deltaY;
-				input.mi.dwFlags = MOUSEEVENTF_MOVE;
-				SendInput(1, &input, sizeof(INPUT));
-			}
+	if (settings.mouse_mode) {
+		// --- MOUSE MODE ---
+		EnterCriticalSection(&data_lock);
+		shared_mouse_aim_active = gyro_is_active;
+		LeaveCriticalSection(&data_lock);
 
+		if (gyro_is_active) {
 			// Zero out the virtual stick in mouse mode to prevent interference.
 			report.sThumbRX = 0;
 			report.sThumbRY = 0;
 		}
-		else {
-			// --- JOYSTICK MODE ---
-			const float x_multiplier = settings.invert_gyro_x ? 10000.0f : -10000.0f;
-			const float y_multiplier = settings.invert_gyro_y ? -10000.0f : 10000.0f;
+	}
+	else if (gyro_is_active) {
+		// --- JOYSTICK MODE ---
+		EnterCriticalSection(&data_lock);
+		shared_mouse_aim_active = false;
+		LeaveCriticalSection(&data_lock);
 
-			float gyro_input_x = gyro_data[1] * settings.sensitivity * x_multiplier;
-			float gyro_input_y = gyro_data[0] * settings.sensitivity * y_multiplier;
+		const float x_multiplier = settings.invert_gyro_x ? 10000.0f : -10000.0f;
+		const float y_multiplier = settings.invert_gyro_y ? -10000.0f : 10000.0f;
 
-			// --- Apply Anti-Deadzone ---
-			if (settings.anti_deathzone > 0.0f) {
-				const float max_stick_val = 32767.0f;
-				float magnitude = sqrtf(gyro_input_x * gyro_input_x + gyro_input_y * gyro_input_y);
+		// Use the visualizer data here as it's updated in the event loop anyway
+		float gyro_input_x = gyro_data[1] * settings.sensitivity * x_multiplier;
+		float gyro_input_y = gyro_data[0] * settings.sensitivity * y_multiplier;
 
-				if (magnitude > 0.01f) {
-					float normalized_mag = magnitude / max_stick_val;
-					if (normalized_mag <= 1.0f) {
-						float dz_fraction = settings.anti_deathzone / 100.0f;
-						float new_normalized_mag = dz_fraction + (1.0f - dz_fraction) * normalized_mag;
-						float scale_factor = new_normalized_mag / normalized_mag;
-						gyro_input_x *= scale_factor;
-						gyro_input_y *= scale_factor;
-					}
+		// --- Apply Anti-Deadzone ---
+		if (settings.anti_deathzone > 0.0f) {
+			const float max_stick_val = 32767.0f;
+			float magnitude = sqrtf(gyro_input_x * gyro_input_x + gyro_input_y * gyro_input_y);
+
+			if (magnitude > 0.01f) {
+				float normalized_mag = magnitude / max_stick_val;
+				if (normalized_mag <= 1.0f) {
+					float dz_fraction = settings.anti_deathzone / 100.0f;
+					float new_normalized_mag = dz_fraction + (1.0f - dz_fraction) * normalized_mag;
+					float scale_factor = new_normalized_mag / normalized_mag;
+					gyro_input_x *= scale_factor;
+					gyro_input_y *= scale_factor;
 				}
 			}
-
-			// --- Combine Gyro and Stick Inputs ---
-			float combined_x = (float)report.sThumbRX + gyro_input_x;
-			float combined_y = (float)report.sThumbRY + gyro_input_y;
-
-			report.sThumbRX = (short)CLAMP(combined_x, -32767.0f, 32767.0f);
-			report.sThumbRY = (short)CLAMP(combined_y, -32767.0f, 32767.0f);
 		}
+
+		// --- Combine Gyro and Stick Inputs ---
+		float combined_x = (float)report.sThumbRX + gyro_input_x;
+		float combined_y = (float)report.sThumbRY + gyro_input_y;
+
+		report.sThumbRX = (short)CLAMP(combined_x, -32767.0f, 32767.0f);
+		report.sThumbRY = (short)CLAMP(combined_y, -32767.0f, 32767.0f);
 	}
+	else {
+		// Gyro is not active, ensure mouse thread is also inactive
+		EnterCriticalSection(&data_lock);
+		shared_mouse_aim_active = false;
+		LeaveCriticalSection(&data_lock);
+	}
+
 
 	if (x360_pad && vigem_client) {
 		vigem_target_x360_update(vigem_client, x360_pad, report);
@@ -911,7 +1013,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 		const char* status_message;
 		if (settings.mouse_mode) {
-			if ((isAiming || settings.always_on_gyro) && !stick_in_use) {
+			if (gyro_is_active) {
 				status_message = "Status: Aiming with Gyro (Mouse)";
 			}
 			else {
@@ -1035,7 +1137,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		int dotY = centerY + (int)dotY_offset;
 
 		// Change color if aiming
-		if ((isAiming || settings.always_on_gyro) && !stick_in_use) {
+		if (gyro_is_active) {
 			SDL_SetRenderDrawColor(renderer, 255, 80, 80, 255); // Red when aiming
 		}
 		else {
@@ -1052,6 +1154,15 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 void SDL_AppQuit(void* appstate, SDL_AppResult result)
 {
+	// --- Stop and clean up the mouse thread ---
+	if (mouse_thread_handle) {
+		run_mouse_thread = false;
+		WaitForSingleObject(mouse_thread_handle, INFINITE);
+		CloseHandle(mouse_thread_handle);
+	}
+	DeleteCriticalSection(&data_lock);
+
+
 	UnhidePhysicalController();
 
 	if (gamepad) {
