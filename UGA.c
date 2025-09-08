@@ -176,9 +176,6 @@ static char* ConvertSymbolicLinkToDeviceInstancePath(const char* symbolic_link)
 {
 	if (!symbolic_link) return NULL;
 
-	// Example Symbolic Link: \\?\HID#VID_054C&PID_09CC&MI_03#8&237c9acc&0&0000#{...GUID...}
-	// Desired Instance Path: HID\VID_054C&PID_09CC&MI_03\8&237c9acc&0&0000
-
 	// Find the start of the relevant part (skip \\?\)
 	const char* start = strstr(symbolic_link, "HID#");
 	if (!start) start = strstr(symbolic_link, "USB#"); // Also handle plain USB devices if needed
@@ -187,8 +184,13 @@ static char* ConvertSymbolicLinkToDeviceInstancePath(const char* symbolic_link)
 		return NULL;
 	}
 
-	// Find the end of the relevant part (the first '{' of the GUID)
-	const char* end = strstr(start, "#{");
+	const char* end = NULL;
+	const char* current_pos = start;
+	while ((current_pos = strstr(current_pos, "#{")) != NULL) {
+		end = current_pos;
+		current_pos++;
+	}
+
 	if (!end) {
 		SDL_Log("Could not find end of instance path in symbolic link.");
 		return NULL;
@@ -319,6 +321,7 @@ static void HidePhysicalController(SDL_Gamepad* pad_to_hide)
 
 	// --- Get the device instance path ---
 	const char* dev_path = ConvertSymbolicLinkToDeviceInstancePath(SDL_GetGamepadPath(pad_to_hide));
+
 	if (!dev_path) {
 		SDL_Log("Error: SDL_GetGamepadPath failed to return a path.");
 		return;
@@ -555,6 +558,8 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 		SDL_Log("Couldn't create window and renderer: %s", SDL_GetError());
 		return SDL_APP_FAILURE;
 	}
+
+	SDL_SetRenderVSync(renderer, 1);
 
 	vigem_client = vigem_alloc();
 	if (vigem_client == NULL) {
@@ -976,7 +981,6 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 	SDL_RenderPresent(renderer);
 
-	SDL_Delay(1);
 	return SDL_APP_CONTINUE;
 }
 
