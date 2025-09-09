@@ -11,12 +11,12 @@
 #include <stdio.h>
 
 #ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600 
+#define _WIN32_WINNT 0x0600
 #endif
 
 #include <shlwapi.h>
 #pragma comment(lib, "shlwapi.lib")
-#include <ShlObj.h> /
+#include <ShlObj.h>
 #pragma comment(lib, "winmm.lib")
 
 #define CLAMP(v, min, max) (((v) < (min)) ? (min) : (((v) > (max)) ? (max) : (v)))
@@ -41,6 +41,9 @@ typedef struct {
 	int config_version;
 	bool mouse_mode;
 	float mouse_sensitivity;
+	unsigned char led_r;
+	unsigned char led_g;
+	unsigned char led_b;
 } AppSettings;
 
 // --- Global State ---
@@ -62,6 +65,8 @@ static AppSettings settings;
 // --- Driver Status ---
 static bool vigem_found = false;
 static bool hidhide_found = false;
+static bool controller_has_led = false;
+
 
 // --- HidHide State ---
 static bool is_controller_hidden = false;
@@ -74,6 +79,10 @@ static HANDLE mouse_thread_handle = NULL;
 static CRITICAL_SECTION data_lock;
 static volatile float shared_gyro_data[3] = { 0.0f, 0.0f, 0.0f };
 static volatile bool shared_mouse_aim_active = false;
+
+// --- Text Input State ---
+static bool is_entering_text = false;
+static char hex_input_buffer[8] = { 0 };
 
 
 // --- Mouse Thread for High-Frequency Input ---
@@ -152,6 +161,9 @@ static void SetDefaultSettings(void) {
 	settings.mouse_mode = false;
 	settings.mouse_sensitivity = 5000.0f;
 	settings.config_version = CURRENT_CONFIG_VERSION;
+	settings.led_r = 48;
+	settings.led_g = 48;
+	settings.led_b = 48;
 }
 
 static void SaveSettings(void) {
@@ -195,6 +207,36 @@ static bool LoadSettings(void) {
 	settings = loaded_settings;
 	SDL_Log("Settings loaded successfully from %s.", CONFIG_FILENAME);
 	return true;
+}
+
+// --- Helper Functions for LED Control ---
+static bool ParseHexColor(const char* hex_string, unsigned char* r, unsigned char* g, unsigned char* b)
+{
+	if (!hex_string || !r || !g || !b) {
+		return false;
+	}
+	const char* ptr = hex_string;
+	if (*ptr == '#') {
+		ptr++;
+	}
+	if (strlen(ptr) != 6) {
+		return false;
+	}
+	int result = sscanf_s(ptr, "%2hhx%2hhx%2hhx", r, g, b);
+	return (result == 3);
+}
+
+static void UpdatePhysicalControllerLED(void)
+{
+	if (!gamepad) {
+		return;
+	}
+	if (SDL_SetGamepadLED(gamepad, settings.led_r, settings.led_g, settings.led_b) < 0) {
+		SDL_Log("Warning: Could not set gamepad LED color: %s", SDL_GetError());
+	}
+	else {
+		SDL_Log("Successfully set physical gamepad LED to #%02X%02X%02X", settings.led_r, settings.led_g, settings.led_b);
+	}
 }
 
 
@@ -549,6 +591,17 @@ static void find_and_open_physical_gamepad(void)
 				else {
 					SDL_Log("Gyroscope enabled!");
 				}
+
+				// --- Check for LED capability ---
+				SDL_PropertiesID props = SDL_GetGamepadProperties(gamepad);
+				controller_has_led = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
+				if (controller_has_led) {
+					SDL_Log("Controller supports programmable LED.");
+					UpdatePhysicalControllerLED();
+				}
+				else {
+					SDL_Log("Controller does not support programmable LED.");
+				}
 				break; // Stop after finding the first one
 			}
 		}
@@ -584,6 +637,7 @@ static bool reset_application(void)
 
 	// 2. Reset state variables
 	gamepad_instance_id = 0;
+	controller_has_led = false;
 	EnterCriticalSection(&data_lock);
 	shared_gyro_data[0] = 0.0f; shared_gyro_data[1] = 0.0f; shared_gyro_data[2] = 0.0f;
 	shared_mouse_aim_active = false;
@@ -715,6 +769,29 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 		return SDL_APP_SUCCESS;
 
 	case SDL_EVENT_KEY_DOWN:
+		// --- Handle text input mode separately ---
+		if (is_entering_text) {
+			if (event->key.key == SDLK_BACKSPACE && strlen(hex_input_buffer) > 1) {
+				hex_input_buffer[strlen(hex_input_buffer) - 1] = '\0';
+			}
+			else if (event->key.key == SDLK_RETURN || event->key.key == SDLK_KP_ENTER) {
+				if (ParseHexColor(hex_input_buffer, &settings.led_r, &settings.led_g, &settings.led_b)) {
+					UpdatePhysicalControllerLED();
+				}
+				else {
+					SDL_Log("Invalid hex color format: %s", hex_input_buffer);
+				}
+				is_entering_text = false;
+				SDL_StopTextInput(window);
+			}
+			else if (event->key.key == SDLK_ESCAPE) {
+				is_entering_text = false;
+				SDL_StopTextInput(window);
+				SDL_Log("LED color change cancelled.");
+			}
+			break; // Don't process other keys while typing
+		}
+
 		switch (event->key.key) {
 		case SDLK_H:
 			if (gamepad) {
@@ -762,6 +839,15 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 				return SDL_APP_SUCCESS;
 			}
 			break;
+		case SDLK_L:
+			if (controller_has_led && !is_entering_text) {
+				is_entering_text = true;
+				hex_input_buffer[0] = '#';
+				hex_input_buffer[1] = '\0';
+				SDL_StartTextInput(window);
+				SDL_Log("Enter a 6-digit hex color code (e.g., #0088FF) and press Enter.");
+			}
+			break;
 		case SDLK_UP:
 			if (settings.mouse_mode) {
 				settings.mouse_sensitivity += 500.0f;
@@ -803,6 +889,14 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 		}
 		break;
 
+	case SDL_EVENT_TEXT_INPUT:
+		if (is_entering_text) {
+			if (strlen(hex_input_buffer) < 7) {
+				strcat_s(hex_input_buffer, sizeof(hex_input_buffer), event->text.text);
+			}
+		}
+		break;
+
 	case SDL_EVENT_GAMEPAD_ADDED:
 	{
 		// Open the gamepad temporarily to check its properties
@@ -824,12 +918,24 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			gamepad = temp_pad;
 			gamepad_instance_id = event->gdevice.which;
 			SDL_Log("Opened gamepad: %s (VID: %04X, PID: %04X)", name, vendor, product);
+
 			HidePhysicalController(gamepad);
 			if (SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, true) < 0) {
 				SDL_Log("Could not enable gyroscope: %s", SDL_GetError());
 			}
 			else {
 				SDL_Log("Gyroscope enabled!");
+			}
+
+			// --- Check for LED capability ---
+			SDL_PropertiesID props = SDL_GetGamepadProperties(gamepad);
+			controller_has_led = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
+			if (controller_has_led) {
+				SDL_Log("Controller supports programmable LED.");
+				UpdatePhysicalControllerLED();
+			}
+			else {
+				SDL_Log("Controller does not support programmable LED.");
 			}
 		}
 		else {
@@ -846,6 +952,7 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, false);
 			SDL_CloseGamepad(gamepad);
 			gamepad = NULL;
+			controller_has_led = false;
 			// Reset aiming state on disconnect
 			settings.selected_button = -1;
 			settings.selected_axis = -1;
@@ -1112,6 +1219,22 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height;
 
+		// --- Display LED color UI if supported ---
+		if (controller_has_led) {
+			if (is_entering_text) {
+				snprintf(buffer, sizeof(buffer), "New Color: %s", hex_input_buffer);
+				SDL_SetRenderDrawColor(renderer, 255, 255, 100, 255); // Yellow for input
+			}
+			else {
+				snprintf(buffer, sizeof(buffer), "LED Color: #%02X%02X%02X", settings.led_r, settings.led_g, settings.led_b);
+			}
+			SDL_RenderDebugText(renderer, 10, y_pos, buffer);
+			if (is_entering_text) {
+				SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255); // Reset color
+			}
+			y_pos += line_height;
+		}
+
 		if (!hidhide_found) {
 			y_pos += line_height; // Extra space
 			SDL_SetRenderDrawColor(renderer, 255, 255, 100, 255); // Yellow
@@ -1127,27 +1250,29 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 		SDL_RenderDebugText(renderer, 10, y_pos, "--- Controls ---");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'M' key:       Toggle Mouse/Joystick Mode");
+		SDL_RenderDebugText(renderer, 10, y_pos, " C:			       Change Aim Button");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'H' key:       Toggle Hiding Controller");
+		SDL_RenderDebugText(renderer, 10, y_pos, " M:			       Toggle Mouse/Joystick Mode");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'C' key:       Change Aim Button");
+		SDL_RenderDebugText(renderer, 10, y_pos, " T:			       Toggle Always-On Gyro");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'T' key:       Toggle Always-On Gyro");
+		SDL_RenderDebugText(renderer, 10, y_pos, " I/O:								Invert Gyro Axis X/Y");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'I' key:       Invert Gyro Y-Axis");
-		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'O' key:       Invert Gyro X-Axis");
-		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " Up/Down:       Adjust Sensitivity");
-		y_pos += line_height;
-		if (!settings.mouse_mode) {
-			SDL_RenderDebugText(renderer, 10, y_pos, " Left/Right:    Adjust Anti-Deadzone");
+		if (controller_has_led) {
+			SDL_RenderDebugText(renderer, 10, y_pos, " L:			       Change LED Color");
 			y_pos += line_height;
 		}
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'S' key:       Save Settings");
+		SDL_RenderDebugText(renderer, 10, y_pos, " Up/Down:				Adjust Sensitivity");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " 'R' key:       Reset Application");
+		if (!settings.mouse_mode) {
+			SDL_RenderDebugText(renderer, 10, y_pos, " Left/Right:	Adjust Anti-Deadzone");
+			y_pos += line_height;
+		}
+		SDL_RenderDebugText(renderer, 10, y_pos, " H:			       Toggle Hiding Controller");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, " S:			       Save Settings");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, " R:			       Reset Application");
 
 
 		// --- Gyro Visualizer ---
