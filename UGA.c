@@ -29,6 +29,18 @@
 #define CONFIG_FILENAME "uga_config.dat"
 #define CURRENT_CONFIG_VERSION 1
 
+// --- Calibration Settings ---
+#define CALIBRATION_SAMPLES 200
+#define GYRO_STABILITY_THRESHOLD 0.1f
+#define GYRO_STABILITY_DURATION_MS 3000
+
+// --- Calibration State Machine ---
+typedef enum {
+	CALIBRATION_IDLE,
+	CALIBRATION_WAITING_FOR_STABILITY,
+	CALIBRATION_SAMPLING
+} CalibrationState;
+
 // --- User configuration structure ---
 typedef struct {
 	SDL_GamepadButton selected_button;
@@ -44,6 +56,7 @@ typedef struct {
 	unsigned char led_r;
 	unsigned char led_g;
 	unsigned char led_b;
+	float gyro_calibration_offset[3]; // [0]=Pitch, [1]=Yaw, [2]=Roll
 } AppSettings;
 
 // --- Global State ---
@@ -83,6 +96,12 @@ static volatile bool shared_mouse_aim_active = false;
 // --- Text Input State ---
 static bool is_entering_text = false;
 static char hex_input_buffer[8] = { 0 };
+
+// --- Calibration State ---
+static CalibrationState calibration_state = CALIBRATION_IDLE;
+static int calibration_sample_count = 0;
+static float gyro_accumulator[3] = { 0.0f, 0.0f, 0.0f };
+static Uint64 stability_timer_start_time = 0;
 
 
 // --- Mouse Thread for High-Frequency Input ---
@@ -164,6 +183,9 @@ static void SetDefaultSettings(void) {
 	settings.led_r = 48;
 	settings.led_g = 48;
 	settings.led_b = 48;
+	settings.gyro_calibration_offset[0] = 0.0f;
+	settings.gyro_calibration_offset[1] = 0.0f;
+	settings.gyro_calibration_offset[2] = 0.0f;
 }
 
 static void SaveSettings(void) {
@@ -191,9 +213,16 @@ static bool LoadSettings(void) {
 	}
 
 	AppSettings loaded_settings;
-	if (fread(&loaded_settings, sizeof(AppSettings), 1, file) != 1) {
-		SDL_Log("Error: Failed to read settings from %s. Using defaults.", CONFIG_FILENAME);
+	if (fread(&loaded_settings, sizeof(loaded_settings), 1, file) != 1) {
+		fseek(file, 0, SEEK_END);
+		long file_size = ftell(file);
 		fclose(file);
+		if (file_size < sizeof(AppSettings)) {
+			SDL_Log("Warning: Config file is from an older version of the app. Using defaults.");
+		}
+		else {
+			SDL_Log("Error: Failed to read settings from %s. Using defaults.", CONFIG_FILENAME);
+		}
 		return false;
 	}
 
@@ -644,6 +673,10 @@ static bool reset_application(void)
 	LeaveCriticalSection(&data_lock);
 	gyro_data[0] = 0.0f; gyro_data[1] = 0.0f; gyro_data[2] = 0.0f;
 	isAiming = false;
+	calibration_state = CALIBRATION_IDLE;
+	calibration_sample_count = 0;
+	gyro_accumulator[0] = gyro_accumulator[1] = gyro_accumulator[2] = 0.0f;
+	stability_timer_start_time = 0;
 	SetDefaultSettings();
 
 	// 3. Re-initialize resources
@@ -831,6 +864,19 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			settings.invert_gyro_x = !settings.invert_gyro_x;
 			SDL_Log("Invert Gyro X-Axis (Yaw) toggled %s.", settings.invert_gyro_x ? "ON" : "OFF");
 			break;
+		case SDLK_K:
+			if (gamepad && calibration_state == CALIBRATION_IDLE) {
+				calibration_state = CALIBRATION_WAITING_FOR_STABILITY;
+				stability_timer_start_time = 0;
+				SDL_Log("Starting gyro calibration... Waiting for controller to be still.");
+			}
+			else if (calibration_state != CALIBRATION_IDLE) {
+				SDL_Log("Calibration is already in progress.");
+			}
+			else {
+				SDL_Log("Connect a controller to calibrate the gyro.");
+			}
+			break;
 		case SDLK_S:
 			SaveSettings();
 			break;
@@ -992,17 +1038,69 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 
 	case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
 		if (event->gsensor.sensor == SDL_SENSOR_GYRO) {
-			// Update the shared data for the mouse thread
-			EnterCriticalSection(&data_lock);
-			shared_gyro_data[0] = event->gsensor.data[0];
-			shared_gyro_data[1] = event->gsensor.data[1];
-			shared_gyro_data[2] = event->gsensor.data[2];
-			LeaveCriticalSection(&data_lock);
+			switch (calibration_state) {
+			case CALIBRATION_IDLE:
+			{
+				// Normal operation: apply the offset and update state.
+				float calibrated_data[3];
+				calibrated_data[0] = event->gsensor.data[0] - settings.gyro_calibration_offset[0];
+				calibrated_data[1] = event->gsensor.data[1] - settings.gyro_calibration_offset[1];
+				calibrated_data[2] = event->gsensor.data[2] - settings.gyro_calibration_offset[2];
 
-			// Also update the local copy for the UI visualizer
-			gyro_data[0] = event->gsensor.data[0];
-			gyro_data[1] = event->gsensor.data[1];
-			gyro_data[2] = event->gsensor.data[2];
+				// Update the shared data for the mouse thread
+				EnterCriticalSection(&data_lock);
+				shared_gyro_data[0] = calibrated_data[0];
+				shared_gyro_data[1] = calibrated_data[1];
+				shared_gyro_data[2] = calibrated_data[2];
+				LeaveCriticalSection(&data_lock);
+
+				// Also update the local copy for the UI visualizer and joystick logic
+				gyro_data[0] = calibrated_data[0];
+				gyro_data[1] = calibrated_data[1];
+				gyro_data[2] = calibrated_data[2];
+				break;
+			}
+			case CALIBRATION_WAITING_FOR_STABILITY:
+			{
+				// Check if the controller is still
+				bool is_stable = fabsf(event->gsensor.data[0]) < GYRO_STABILITY_THRESHOLD &&
+					fabsf(event->gsensor.data[1]) < GYRO_STABILITY_THRESHOLD &&
+					fabsf(event->gsensor.data[2]) < GYRO_STABILITY_THRESHOLD;
+
+				if (is_stable) {
+					if (stability_timer_start_time == 0) {
+						// Timer not started, start it now
+						stability_timer_start_time = SDL_GetPerformanceCounter();
+					}
+					else {
+						// Timer is running, check if duration has passed
+						Uint64 current_time = SDL_GetPerformanceCounter();
+						Uint64 elapsed_ms = (current_time - stability_timer_start_time) * 1000 / SDL_GetPerformanceFrequency();
+						if (elapsed_ms >= GYRO_STABILITY_DURATION_MS) {
+							// Stable for long enough, start sampling
+							calibration_state = CALIBRATION_SAMPLING;
+							calibration_sample_count = 0;
+							gyro_accumulator[0] = 0.0f;
+							gyro_accumulator[1] = 0.0f;
+							gyro_accumulator[2] = 0.0f;
+							SDL_Log("Controller is stable. Starting data collection...");
+						}
+					}
+				}
+				else {
+					// Controller moved, reset the timer
+					stability_timer_start_time = 0;
+				}
+				break;
+			}
+			case CALIBRATION_SAMPLING:
+				// We are sampling: accumulate raw data and count samples.
+				gyro_accumulator[0] += event->gsensor.data[0];
+				gyro_accumulator[1] += event->gsensor.data[1];
+				gyro_accumulator[2] += event->gsensor.data[2];
+				calibration_sample_count++;
+				break;
+			}
 		}
 		break;
 	}
@@ -1011,6 +1109,19 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 
 SDL_AppResult SDL_AppIterate(void* appstate)
 {
+	// --- Handle calibration completion ---
+	if (calibration_state == CALIBRATION_SAMPLING && calibration_sample_count >= CALIBRATION_SAMPLES) {
+		settings.gyro_calibration_offset[0] = gyro_accumulator[0] / CALIBRATION_SAMPLES;
+		settings.gyro_calibration_offset[1] = gyro_accumulator[1] / CALIBRATION_SAMPLES;
+		settings.gyro_calibration_offset[2] = gyro_accumulator[2] / CALIBRATION_SAMPLES;
+		calibration_state = CALIBRATION_IDLE;
+		SDL_Log("Calibration complete. Offsets saved.");
+		SDL_Log("-> Pitch: %.4f, Yaw: %.4f, Roll: %.4f",
+			settings.gyro_calibration_offset[0],
+			settings.gyro_calibration_offset[1],
+			settings.gyro_calibration_offset[2]);
+	}
+
 	XUSB_REPORT report;
 	XUSB_REPORT_INIT(&report);
 	bool stick_in_use = false;
@@ -1058,7 +1169,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 	}
 
 	// --- Gyro Input Logic ---
-	bool gyro_is_active = (isAiming || settings.always_on_gyro) && !stick_in_use;
+	bool gyro_is_active = (isAiming || settings.always_on_gyro) && !stick_in_use && (calibration_state == CALIBRATION_IDLE);
 
 	if (settings.mouse_mode) {
 		// --- MOUSE MODE ---
@@ -1153,6 +1264,43 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		float y = (h - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE) / 2.0f;
 		SDL_RenderDebugText(renderer, x, y, message);
 	}
+	else if (calibration_state != CALIBRATION_IDLE) {
+		int w = 0, h = 0;
+		SDL_GetRenderOutputSize(renderer, &w, &h);
+		float y_pos = (h - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * 3) / 2.0f;
+		float line_height = (float)(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 4);
+		char buffer[128];
+
+		SDL_SetRenderDrawColor(renderer, 0, 128, 255, 255);
+
+		if (calibration_state == CALIBRATION_WAITING_FOR_STABILITY) {
+			const char* msg1 = "WAITING FOR STABILITY...";
+			float x1 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg1)) / 2.0f;
+			SDL_RenderDebugText(renderer, x1, y_pos, msg1);
+			y_pos += line_height;
+
+			if (stability_timer_start_time > 0) {
+				Uint64 elapsed_ms = (SDL_GetPerformanceCounter() - stability_timer_start_time) * 1000 / SDL_GetPerformanceFrequency();
+				int remaining_secs = (int)((GYRO_STABILITY_DURATION_MS - elapsed_ms) / 1000) + 1;
+				snprintf(buffer, sizeof(buffer), "Keep still for %d more seconds...", remaining_secs);
+			}
+			else {
+				snprintf(buffer, sizeof(buffer), "Place controller on a flat surface.");
+			}
+			float x2 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(buffer)) / 2.0f;
+			SDL_RenderDebugText(renderer, x2, y_pos, buffer);
+		}
+		else if (calibration_state == CALIBRATION_SAMPLING) {
+			snprintf(buffer, sizeof(buffer), "SAMPLING... (%d / %d)", calibration_sample_count, CALIBRATION_SAMPLES);
+			const char* msg2 = "Do not move the controller.";
+			float x1 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(buffer)) / 2.0f;
+			float x2 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg2)) / 2.0f;
+
+			SDL_RenderDebugText(renderer, x1, y_pos, buffer);
+			y_pos += line_height;
+			SDL_RenderDebugText(renderer, x2, y_pos, msg2);
+		}
+	}
 	else {
 		char buffer[256];
 		float y_pos = 10.0f;
@@ -1215,6 +1363,10 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height;
 
+		snprintf(buffer, sizeof(buffer), "Gyro Offset X: %.3f Y: %.3f", settings.gyro_calibration_offset[0], settings.gyro_calibration_offset[1]);
+		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
+		y_pos += line_height;
+
 		snprintf(buffer, sizeof(buffer), "HidHide status: %s", is_controller_hidden ? "Hidden" : "Visible");
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height;
@@ -1269,6 +1421,8 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 			y_pos += line_height;
 		}
 		SDL_RenderDebugText(renderer, 10, y_pos, " H:			       Toggle Hiding Controller");
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, 10, y_pos, " K:          Calibrate Gyro");
 		y_pos += line_height;
 		SDL_RenderDebugText(renderer, 10, y_pos, " S:			       Save Settings");
 		y_pos += line_height;
