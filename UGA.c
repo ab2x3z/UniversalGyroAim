@@ -10,6 +10,10 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0600
 #endif
@@ -38,7 +42,10 @@
 typedef enum {
 	CALIBRATION_IDLE,
 	CALIBRATION_WAITING_FOR_STABILITY,
-	CALIBRATION_SAMPLING
+	CALIBRATION_SAMPLING,
+	FLICK_STICK_CALIBRATION_START,
+	FLICK_STICK_CALIBRATION_TURNING,
+	FLICK_STICK_CALIBRATION_ADJUST
 } CalibrationState;
 
 // --- User configuration structure ---
@@ -57,6 +64,9 @@ typedef struct {
 	unsigned char led_g;
 	unsigned char led_b;
 	float gyro_calibration_offset[3]; // [0]=Pitch, [1]=Yaw, [2]=Roll
+	bool flick_stick_enabled;
+	bool flick_stick_calibrated;
+	float flick_stick_calibration_value; // Mouse units for a 360 turn
 } AppSettings;
 
 // --- Global State ---
@@ -91,6 +101,7 @@ static volatile bool run_mouse_thread = false;
 static HANDLE mouse_thread_handle = NULL;
 static CRITICAL_SECTION data_lock;
 static volatile float shared_gyro_data[3] = { 0.0f, 0.0f, 0.0f };
+static volatile float shared_flick_stick_delta_x = 0.0f;
 static volatile bool shared_mouse_aim_active = false;
 
 // --- Text Input State ---
@@ -101,7 +112,12 @@ static char hex_input_buffer[8] = { 0 };
 static CalibrationState calibration_state = CALIBRATION_IDLE;
 static int calibration_sample_count = 0;
 static float gyro_accumulator[3] = { 0.0f, 0.0f, 0.0f };
+static float flick_stick_turn_remaining = 0.0f;
 static Uint64 stability_timer_start_time = 0;
+
+// --- Flick Stick State ---
+static float flick_last_angle = 0.0f;
+static bool is_flick_stick_active = false;
 
 
 // --- Mouse Thread for High-Frequency Input ---
@@ -125,16 +141,21 @@ DWORD WINAPI MouseThread(LPVOID lpParam) {
 		EnterCriticalSection(&data_lock);
 		float current_gyro_x = shared_gyro_data[0];
 		float current_gyro_y = shared_gyro_data[1];
+		float flick_stick_dx = shared_flick_stick_delta_x;
+		shared_flick_stick_delta_x = 0.0f;
 		bool is_active = shared_mouse_aim_active;
 		LeaveCriticalSection(&data_lock);
 
 		// --- Perform calculations inside this thread ---
-		if (is_active) {
-			float deltaX = current_gyro_y * dt * settings.mouse_sensitivity * (settings.invert_gyro_x ? 1.0f : -1.0f);
-			float deltaY = current_gyro_x * dt * settings.mouse_sensitivity * (settings.invert_gyro_y ? 1.0f : -1.0f);
-			accumulator_x += deltaX;
-			accumulator_y += deltaY;
+		float deltaX = flick_stick_dx;
+		float deltaY = 0.0f;
+
+		if (is_active) { // Add gyro movement if active
+			deltaX += current_gyro_y * dt * settings.mouse_sensitivity * (settings.invert_gyro_x ? 1.0f : -1.0f);
+			deltaY += current_gyro_x * dt * settings.mouse_sensitivity * (settings.invert_gyro_y ? 1.0f : -1.0f);
 		}
+		accumulator_x += deltaX;
+		accumulator_y += deltaY;
 
 		// --- Dispatch mouse movement ---
 		LONG move_x = 0;
@@ -186,6 +207,9 @@ static void SetDefaultSettings(void) {
 	settings.gyro_calibration_offset[0] = 0.0f;
 	settings.gyro_calibration_offset[1] = 0.0f;
 	settings.gyro_calibration_offset[2] = 0.0f;
+	settings.flick_stick_enabled = false;
+	settings.flick_stick_calibrated = false;
+	settings.flick_stick_calibration_value = 12000.0f;
 }
 
 static void SaveSettings(void) {
@@ -231,6 +255,10 @@ static bool LoadSettings(void) {
 	if (loaded_settings.config_version != CURRENT_CONFIG_VERSION) {
 		SDL_Log("Warning: Config file version mismatch. Expected %d, got %d. Using defaults.", CURRENT_CONFIG_VERSION, loaded_settings.config_version);
 		return false;
+	}
+
+	if (loaded_settings.flick_stick_enabled) {
+		loaded_settings.always_on_gyro = true;
 	}
 
 	settings = loaded_settings;
@@ -669,6 +697,7 @@ static bool reset_application(void)
 	controller_has_led = false;
 	EnterCriticalSection(&data_lock);
 	shared_gyro_data[0] = 0.0f; shared_gyro_data[1] = 0.0f; shared_gyro_data[2] = 0.0f;
+	shared_flick_stick_delta_x = 0.0f;
 	shared_mouse_aim_active = false;
 	LeaveCriticalSection(&data_lock);
 	gyro_data[0] = 0.0f; gyro_data[1] = 0.0f; gyro_data[2] = 0.0f;
@@ -677,6 +706,8 @@ static bool reset_application(void)
 	calibration_sample_count = 0;
 	gyro_accumulator[0] = gyro_accumulator[1] = gyro_accumulator[2] = 0.0f;
 	stability_timer_start_time = 0;
+	is_flick_stick_active = false;
+	flick_last_angle = 0.0f;
 	SetDefaultSettings();
 
 	// 3. Re-initialize resources
@@ -846,15 +877,44 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			isAiming = false;
 			break;
 		case SDLK_T:
-			settings.always_on_gyro = !settings.always_on_gyro;
-			if (settings.always_on_gyro) {
-				isAiming = false;
+			if (settings.flick_stick_enabled) {
+				SDL_Log("Always-On Gyro is required for Flick Stick and cannot be disabled.");
 			}
-			SDL_Log("Always-on gyro toggled %s.", settings.always_on_gyro ? "ON" : "OFF");
+			else {
+				settings.always_on_gyro = !settings.always_on_gyro;
+				if (settings.always_on_gyro) {
+					isAiming = false;
+				}
+				SDL_Log("Always-on gyro toggled %s.", settings.always_on_gyro ? "ON" : "OFF");
+			}
 			break;
 		case SDLK_M:
-			settings.mouse_mode = !settings.mouse_mode;
-			SDL_Log("Mouse mode toggled %s.", settings.mouse_mode ? "ON" : "OFF");
+			if (settings.flick_stick_enabled) {
+				SDL_Log("Cannot change to Joystick Mode while Flick Stick is active.");
+			}
+			else {
+				settings.mouse_mode = !settings.mouse_mode;
+				SDL_Log("Mouse mode toggled %s.", settings.mouse_mode ? "ON" : "OFF");
+			}
+			break;
+		case SDLK_F:
+			if (!settings.flick_stick_enabled) {
+				if (!settings.mouse_mode) {
+					SDL_Log("Flick Stick requires Mouse Mode. Press 'M' to enable it first.");
+				}
+				else {
+					settings.flick_stick_enabled = true;
+					settings.always_on_gyro = true;
+					is_flick_stick_active = false;
+					flick_last_angle = 0.0f;
+					SDL_Log("Flick Stick enabled. Always-On Gyro has been force-enabled.");
+				}
+			}
+			else {
+				settings.flick_stick_enabled = false;
+				settings.always_on_gyro = false;
+				SDL_Log("Flick Stick disabled. Always-On Gyro has been disabled.");
+			}
 			break;
 		case SDLK_I:
 			settings.invert_gyro_y = !settings.invert_gyro_y;
@@ -871,10 +931,27 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 				SDL_Log("Starting gyro calibration... Waiting for controller to be still.");
 			}
 			else if (calibration_state != CALIBRATION_IDLE) {
-				SDL_Log("Calibration is already in progress.");
+				SDL_Log("Another calibration is already in progress.");
 			}
 			else {
 				SDL_Log("Connect a controller to calibrate the gyro.");
+			}
+			break;
+		case SDLK_J:
+			if (gamepad && calibration_state == CALIBRATION_IDLE) {
+				if (!settings.mouse_mode) {
+					SDL_Log("Flick Stick calibration requires Mouse Mode to be enabled first (Press M).");
+				}
+				else {
+					calibration_state = FLICK_STICK_CALIBRATION_START;
+					SDL_Log("Starting Flick Stick calibration...");
+				}
+			}
+			else if (calibration_state != CALIBRATION_IDLE) {
+				SDL_Log("Another calibration is already in progress.");
+			}
+			else {
+				SDL_Log("Connect a controller to calibrate Flick Stick.");
 			}
 			break;
 		case SDLK_S:
@@ -1009,6 +1086,58 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 	case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
 	case SDL_EVENT_GAMEPAD_BUTTON_UP:
 		if (event->gbutton.which == gamepad_instance_id) {
+			// --- Intercept buttons for Flick Stick calibration ---
+			bool button_handled = false;
+			if (event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+				if (calibration_state == FLICK_STICK_CALIBRATION_START) {
+					if (event->gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH) { // 'A' button
+						calibration_state = FLICK_STICK_CALIBRATION_TURNING;
+						flick_stick_turn_remaining = settings.flick_stick_calibration_value;
+						button_handled = true;
+					}
+					else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST) { // 'B' button to cancel
+						calibration_state = CALIBRATION_IDLE;
+						button_handled = true;
+					}
+				}
+				else if (calibration_state == FLICK_STICK_CALIBRATION_ADJUST) {
+					const float ultra_fine_adjust_amount = 1.0f;
+					const float adjust_amount = 50.0f;
+					const float coarse_adjust_amount = 500.0f;
+					if (event->gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_UP) {
+						settings.flick_stick_calibration_value += adjust_amount;
+					}
+					else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_DOWN) {
+						settings.flick_stick_calibration_value -= adjust_amount;
+					}
+					else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_RIGHT) {
+						settings.flick_stick_calibration_value += ultra_fine_adjust_amount;
+					}
+					else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_LEFT) {
+						settings.flick_stick_calibration_value -= ultra_fine_adjust_amount;
+					}
+					else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER) {
+						settings.flick_stick_calibration_value += coarse_adjust_amount;
+					}
+					else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER) {
+						settings.flick_stick_calibration_value -= coarse_adjust_amount;
+					}
+					else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH) { // 'A' to re-test
+						calibration_state = FLICK_STICK_CALIBRATION_TURNING;
+						flick_stick_turn_remaining = settings.flick_stick_calibration_value;
+					}
+					else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST) { // 'B' to save and exit
+						settings.flick_stick_calibrated = true;
+						SaveSettings();
+						calibration_state = CALIBRATION_IDLE;
+						SDL_Log("Flick Stick calibration saved. Value: %.2f", settings.flick_stick_calibration_value);
+					}
+					button_handled = true;
+				}
+			}
+			if (button_handled) break;
+
+			// --- Normal button handling ---
 			if (settings.selected_button == -1 && settings.selected_axis == -1 && event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
 				settings.selected_button = event->gbutton.button;
 				SDL_Log("Aim button set to: %s", SDL_GetGamepadStringForButton(settings.selected_button));
@@ -1124,107 +1253,131 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 	XUSB_REPORT report;
 	XUSB_REPORT_INIT(&report);
-	bool stick_in_use = false;
+
+	bool gyro_is_active = false;
+	float flick_stick_output_x = 0.0f;
+
+
+	// --- Handle Flick Stick Test Turn ---
+	if (calibration_state == FLICK_STICK_CALIBRATION_TURNING) {
+		const float TURN_SPEED_FACTOR = 0.15f; // How fast the test turn happens
+		float turn_amount_this_frame = flick_stick_turn_remaining * TURN_SPEED_FACTOR;
+
+		if (fabsf(flick_stick_turn_remaining) < 1.0f) {
+			turn_amount_this_frame = flick_stick_turn_remaining;
+		}
+
+		EnterCriticalSection(&data_lock);
+		shared_flick_stick_delta_x += turn_amount_this_frame;
+		LeaveCriticalSection(&data_lock);
+
+		flick_stick_turn_remaining -= turn_amount_this_frame;
+
+		if (fabsf(flick_stick_turn_remaining) < 0.1f) {
+			calibration_state = FLICK_STICK_CALIBRATION_ADJUST;
+		}
+	}
 
 	if (gamepad) {
 		// --- Passthrough physical controller state to virtual controller ---
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_SOUTH)) report.wButtons |= XUSB_GAMEPAD_A;
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_EAST)) report.wButtons |= XUSB_GAMEPAD_B;
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_WEST)) report.wButtons |= XUSB_GAMEPAD_X;
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_NORTH)) report.wButtons |= XUSB_GAMEPAD_Y;
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER;
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_BACK)) report.wButtons |= XUSB_GAMEPAD_BACK;
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_START)) report.wButtons |= XUSB_GAMEPAD_START;
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_LEFT_STICK)) report.wButtons |= XUSB_GAMEPAD_LEFT_THUMB;
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) report.wButtons |= XUSB_GAMEPAD_RIGHT_THUMB;
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) report.wButtons |= XUSB_GAMEPAD_DPAD_UP;
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) report.wButtons |= XUSB_GAMEPAD_DPAD_DOWN;
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) report.wButtons |= XUSB_GAMEPAD_DPAD_LEFT;
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) report.wButtons |= XUSB_GAMEPAD_DPAD_RIGHT;
-		if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_GUIDE)) report.wButtons |= XUSB_GAMEPAD_GUIDE;
+		if (calibration_state == CALIBRATION_IDLE) {
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_SOUTH)) report.wButtons |= XUSB_GAMEPAD_A;
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_EAST)) report.wButtons |= XUSB_GAMEPAD_B;
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_WEST)) report.wButtons |= XUSB_GAMEPAD_X;
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_NORTH)) report.wButtons |= XUSB_GAMEPAD_Y;
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) report.wButtons |= XUSB_GAMEPAD_LEFT_SHOULDER;
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) report.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_BACK)) report.wButtons |= XUSB_GAMEPAD_BACK;
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_START)) report.wButtons |= XUSB_GAMEPAD_START;
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_LEFT_STICK)) report.wButtons |= XUSB_GAMEPAD_LEFT_THUMB;
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) report.wButtons |= XUSB_GAMEPAD_RIGHT_THUMB;
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP)) report.wButtons |= XUSB_GAMEPAD_DPAD_UP;
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) report.wButtons |= XUSB_GAMEPAD_DPAD_DOWN;
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) report.wButtons |= XUSB_GAMEPAD_DPAD_LEFT;
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) report.wButtons |= XUSB_GAMEPAD_DPAD_RIGHT;
+			if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_GUIDE)) report.wButtons |= XUSB_GAMEPAD_GUIDE;
 
-		// --- Trigger Passthrough Logic ---
-		report.bLeftTrigger = (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) * 255) / 32767;
-		report.bRightTrigger = (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) * 255) / 32767;
+			report.bLeftTrigger = (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) * 255) / 32767;
+			report.bRightTrigger = (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) * 255) / 32767;
 
-		// --- Stick Passthrough ---
-		Sint16 lx = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTX);
-		Sint16 ly = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTY);
+			report.sThumbLX = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTX);
+			Sint16 ly = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTY);
+			report.sThumbLY = (ly == -32768) ? 32767 : -ly;
+		}
+
+		// --- Determine Gyro state for this frame ---
+		gyro_is_active = (isAiming || settings.always_on_gyro) && (calibration_state == CALIBRATION_IDLE);
+
+		// --- Right Stick Processing ---
 		Sint16 rx = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
 		Sint16 ry = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
 
-		report.sThumbLX = lx;
-		report.sThumbLY = (ly == -32768) ? 32767 : -ly;
+		if (settings.flick_stick_enabled && settings.flick_stick_calibrated && calibration_state == CALIBRATION_IDLE) {
+			// --- Flick Stick Logic ---
+			const float FLICK_STICK_DEADZONE = 24000.0f;
+			float stick_magnitude = sqrtf((float)rx * rx + (float)ry * ry);
 
-		report.sThumbRX = rx;
-		report.sThumbRY = (ry == -32768) ? 32767 : -ry;
+			if (stick_magnitude > FLICK_STICK_DEADZONE) {
+				float current_angle = atan2f((float)-ry, (float)rx);
 
-		// --- Check for Stick Priority ---
-		const float stick_deadzone = 8000.0f;
-		float stick_magnitude = sqrtf((float)report.sThumbRX * report.sThumbRX + (float)report.sThumbRY * report.sThumbRY);
-		if (stick_magnitude >= stick_deadzone) {
-			stick_in_use = true;
-		}
-	}
+				if (!is_flick_stick_active) {
+					is_flick_stick_active = true;
+					float flick_angle = current_angle - ((float)M_PI / 2.0f);
+					while (flick_angle <= -(float)M_PI) flick_angle += (2.0f * (float)M_PI);
+					while (flick_angle > (float)M_PI) flick_angle -= (2.0f * (float)M_PI);
+					flick_stick_output_x = -(flick_angle / (float)M_PI) * (settings.flick_stick_calibration_value / 2.0f);
+				}
+				else {
+					float delta_angle = current_angle - flick_last_angle;
+					if (delta_angle > M_PI) delta_angle -= (2.0f * (float)M_PI);
+					if (delta_angle < -M_PI) delta_angle += (2.0f * (float)M_PI);
+					flick_stick_output_x = -(delta_angle / (2.0f * (float)M_PI)) * settings.flick_stick_calibration_value;
+				}
+				flick_last_angle = current_angle;
+			}
+			else {
+				is_flick_stick_active = false;
+				flick_stick_output_x = 0.0f;
+			}
 
-	// --- Gyro Input Logic ---
-	bool gyro_is_active = (isAiming || settings.always_on_gyro) && !stick_in_use && (calibration_state == CALIBRATION_IDLE);
-
-	if (settings.mouse_mode) {
-		// --- MOUSE MODE ---
-		EnterCriticalSection(&data_lock);
-		shared_mouse_aim_active = gyro_is_active;
-		LeaveCriticalSection(&data_lock);
-
-		if (gyro_is_active) {
-			// Zero out the virtual stick in mouse mode to prevent interference.
+			// Pass output to the mouse thread. Gyro is handled there.
+			EnterCriticalSection(&data_lock);
+			shared_mouse_aim_active = gyro_is_active;
+			shared_flick_stick_delta_x += flick_stick_output_x;
+			LeaveCriticalSection(&data_lock);
 			report.sThumbRX = 0;
 			report.sThumbRY = 0;
 		}
-	}
-	else if (gyro_is_active) {
-		// --- JOYSTICK MODE ---
-		EnterCriticalSection(&data_lock);
-		shared_mouse_aim_active = false;
-		LeaveCriticalSection(&data_lock);
+		else {
+			// --- Standard Logic ---
+			float stick_magnitude = sqrtf((float)rx * rx + (float)ry * ry);
+			bool stick_in_use = stick_magnitude > 8000.0f;
+			bool use_gyro_for_aim = gyro_is_active && !stick_in_use;
 
-		const float x_multiplier = settings.invert_gyro_x ? 10000.0f : -10000.0f;
-		const float y_multiplier = settings.invert_gyro_y ? -10000.0f : 10000.0f;
+			if (settings.mouse_mode) {
+				EnterCriticalSection(&data_lock);
+				shared_mouse_aim_active = use_gyro_for_aim;
+				LeaveCriticalSection(&data_lock);
+				report.sThumbRX = 0;
+				report.sThumbRY = 0;
+			}
+			else { // Joystick Mode
+				float combined_x = (float)rx;
+				float combined_y = (ry == -32768) ? 32767.f : (float)-ry;
 
-		// Use the visualizer data here as it's updated in the event loop anyway
-		float gyro_input_x = gyro_data[1] * settings.sensitivity * x_multiplier;
-		float gyro_input_y = gyro_data[0] * settings.sensitivity * y_multiplier;
+				if (use_gyro_for_aim) {
+					const float x_multiplier = settings.invert_gyro_x ? 10000.0f : -10000.0f;
+					const float y_multiplier = settings.invert_gyro_y ? -10000.0f : 10000.0f;
+					float gyro_input_x = gyro_data[1] * settings.sensitivity * x_multiplier;
+					float gyro_input_y = gyro_data[0] * settings.sensitivity * y_multiplier;
 
-		// --- Apply Anti-Deadzone ---
-		if (settings.anti_deathzone > 0.0f) {
-			const float max_stick_val = 32767.0f;
-			float magnitude = sqrtf(gyro_input_x * gyro_input_x + gyro_input_y * gyro_input_y);
-
-			if (magnitude > 0.01f) {
-				float normalized_mag = magnitude / max_stick_val;
-				if (normalized_mag <= 1.0f) {
-					float dz_fraction = settings.anti_deathzone / 100.0f;
-					float new_normalized_mag = dz_fraction + (1.0f - dz_fraction) * normalized_mag;
-					float scale_factor = new_normalized_mag / normalized_mag;
-					gyro_input_x *= scale_factor;
-					gyro_input_y *= scale_factor;
+					combined_x += gyro_input_x;
+					combined_y += gyro_input_y;
 				}
+				report.sThumbRX = (short)CLAMP(combined_x, -32767.0f, 32767.0f);
+				report.sThumbRY = (short)CLAMP(combined_y, -32767.0f, 32767.0f);
 			}
 		}
-
-		// --- Combine Gyro and Stick Inputs ---
-		float combined_x = (float)report.sThumbRX + gyro_input_x;
-		float combined_y = (float)report.sThumbRY + gyro_input_y;
-
-		report.sThumbRX = (short)CLAMP(combined_x, -32767.0f, 32767.0f);
-		report.sThumbRY = (short)CLAMP(combined_y, -32767.0f, 32767.0f);
-	}
-	else {
-		// Gyro is not active, ensure mouse thread is also inactive
-		EnterCriticalSection(&data_lock);
-		shared_mouse_aim_active = false;
-		LeaveCriticalSection(&data_lock);
 	}
 
 
@@ -1267,14 +1420,14 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 	else if (calibration_state != CALIBRATION_IDLE) {
 		int w = 0, h = 0;
 		SDL_GetRenderOutputSize(renderer, &w, &h);
-		float y_pos = (h - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * 3) / 2.0f;
+		float y_pos = (h - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * 7) / 2.0f;
 		float line_height = (float)(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 4);
 		char buffer[128];
 
 		SDL_SetRenderDrawColor(renderer, 0, 128, 255, 255);
 
 		if (calibration_state == CALIBRATION_WAITING_FOR_STABILITY) {
-			const char* msg1 = "WAITING FOR STABILITY...";
+			const char* msg1 = "GYRO CALIBRATION: WAITING FOR STABILITY...";
 			float x1 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg1)) / 2.0f;
 			SDL_RenderDebugText(renderer, x1, y_pos, msg1);
 			y_pos += line_height;
@@ -1291,7 +1444,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 			SDL_RenderDebugText(renderer, x2, y_pos, buffer);
 		}
 		else if (calibration_state == CALIBRATION_SAMPLING) {
-			snprintf(buffer, sizeof(buffer), "SAMPLING... (%d / %d)", calibration_sample_count, CALIBRATION_SAMPLES);
+			snprintf(buffer, sizeof(buffer), "GYRO CALIBRATION: SAMPLING... (%d / %d)", calibration_sample_count, CALIBRATION_SAMPLES);
 			const char* msg2 = "Do not move the controller.";
 			float x1 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(buffer)) / 2.0f;
 			float x2 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg2)) / 2.0f;
@@ -1299,6 +1452,50 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 			SDL_RenderDebugText(renderer, x1, y_pos, buffer);
 			y_pos += line_height;
 			SDL_RenderDebugText(renderer, x2, y_pos, msg2);
+		}
+		else if (calibration_state == FLICK_STICK_CALIBRATION_START) {
+			const char* msg1 = "FLICK STICK CALIBRATION";
+			const char* msg2 = "Press (A) to perform a test 360 turn.";
+			const char* msg3 = "Press (B) to cancel.";
+			float x1 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg1)) / 2.0f;
+			float x2 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg2)) / 2.0f;
+			float x3 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg3)) / 2.0f;
+			SDL_RenderDebugText(renderer, x1, y_pos, msg1);
+			y_pos += line_height * 1.5f;
+			SDL_RenderDebugText(renderer, x2, y_pos, msg2);
+			y_pos += line_height;
+			SDL_RenderDebugText(renderer, x3, y_pos, msg3);
+		}
+		else if (calibration_state == FLICK_STICK_CALIBRATION_TURNING) {
+			const char* msg1 = "TURNING...";
+			float x1 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg1)) / 2.0f;
+			SDL_RenderDebugText(renderer, x1, y_pos, msg1);
+		}
+		else if (calibration_state == FLICK_STICK_CALIBRATION_ADJUST) {
+			const char* msg1 = "ADJUST CALIBRATION";
+			snprintf(buffer, sizeof(buffer), "Current Value: %.1f", settings.flick_stick_calibration_value);
+			const char* msg2 = "D-Pad U/D: Fine Tune (+/- 50)";
+			const char* msg5 = "D-Pad L/R: Ultra-Fine Tune (+/- 1)";
+			const char* msg3 = "Shoulders: Coarse Tune (+/- 500)";
+			const char* msg4 = "Press (A) to re-test. Press (B) to save.";
+			float x1 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg1)) / 2.0f;
+			float x_buf = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(buffer)) / 2.0f;
+			float x2 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg2)) / 2.0f;
+			float x5 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg5)) / 2.0f;
+			float x3 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg3)) / 2.0f;
+			float x4 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg4)) / 2.0f;
+
+			SDL_RenderDebugText(renderer, x1, y_pos, msg1);
+			y_pos += line_height;
+			SDL_RenderDebugText(renderer, x_buf, y_pos, buffer);
+			y_pos += line_height * 1.5f;
+			SDL_RenderDebugText(renderer, x2, y_pos, msg2);
+			y_pos += line_height;
+			SDL_RenderDebugText(renderer, x5, y_pos, msg5);
+			y_pos += line_height;
+			SDL_RenderDebugText(renderer, x3, y_pos, msg3);
+			y_pos += line_height;
+			SDL_RenderDebugText(renderer, x4, y_pos, msg4);
 		}
 	}
 	else {
@@ -1311,12 +1508,12 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 			if (gyro_is_active) {
 				status_message = "Status: Aiming with Gyro (Mouse)";
 			}
+			else if (settings.flick_stick_enabled) {
+				status_message = "Status: OK (Flick Stick Mode)";
+			}
 			else {
 				status_message = "Status: OK (Mouse Mode)";
 			}
-		}
-		else if (stick_in_use && (isAiming || settings.always_on_gyro)) {
-			status_message = "Status: Stick Priority Active";
 		}
 		else if (settings.always_on_gyro) {
 			status_message = "Status: Gyro Always ON (Joystick)";
@@ -1351,7 +1548,14 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 		y_pos += line_height;
 
-		if (!settings.mouse_mode) {
+		if (settings.mouse_mode) {
+			snprintf(buffer, sizeof(buffer), "Flick Stick: %s (%s)",
+				settings.flick_stick_enabled ? "ON" : "OFF",
+				settings.flick_stick_calibrated ? "Calibrated" : "Needs Calibrating!");
+			SDL_RenderDebugText(renderer, 10, y_pos, buffer);
+			y_pos += line_height;
+		}
+		else {
 			snprintf(buffer, sizeof(buffer), "Anti-Deadzone: %.0f%%", settings.anti_deathzone);
 			SDL_RenderDebugText(renderer, 10, y_pos, buffer);
 			y_pos += line_height;
@@ -1388,7 +1592,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		}
 
 		if (!hidhide_found) {
-			y_pos += line_height; // Extra space
+			y_pos += line_height;
 			SDL_SetRenderDrawColor(renderer, 255, 255, 100, 255); // Yellow
 			SDL_RenderDebugText(renderer, 10, y_pos, "Warning: HidHide not found.");
 			y_pos += line_height;
@@ -1404,10 +1608,18 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		y_pos += line_height;
 		SDL_RenderDebugText(renderer, 10, y_pos, " C:			       Change Aim Button");
 		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " M:			       Toggle Mouse/Joystick Mode");
-		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " T:			       Toggle Always-On Gyro");
-		y_pos += line_height;
+		if (!settings.flick_stick_enabled) {
+			SDL_RenderDebugText(renderer, 10, y_pos, " M:			       Toggle Mouse/Joystick Mode");
+			y_pos += line_height;
+		}
+		if (settings.mouse_mode) {
+			SDL_RenderDebugText(renderer, 10, y_pos, " F:			       Toggle Flick Stick");
+			y_pos += line_height;
+		}
+		if (!settings.flick_stick_enabled) {
+			SDL_RenderDebugText(renderer, 10, y_pos, " T:			       Toggle Always-On Gyro");
+			y_pos += line_height;
+		}
 		SDL_RenderDebugText(renderer, 10, y_pos, " I/O:								Invert Gyro Axis X/Y");
 		y_pos += line_height;
 		if (controller_has_led) {
@@ -1424,6 +1636,10 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		y_pos += line_height;
 		SDL_RenderDebugText(renderer, 10, y_pos, " K:          Calibrate Gyro");
 		y_pos += line_height;
+		if (settings.flick_stick_enabled) {
+			SDL_RenderDebugText(renderer, 10, y_pos, " J:          Calibrate Flick Stick");
+			y_pos += line_height;
+		}
 		SDL_RenderDebugText(renderer, 10, y_pos, " S:			       Save Settings");
 		y_pos += line_height;
 		SDL_RenderDebugText(renderer, 10, y_pos, " R:			       Reset Application");
@@ -1433,18 +1649,15 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		int w, h;
 		SDL_GetRenderOutputSize(renderer, &w, &h);
 
-		// Position the visualizer at the bottom right
 		const int centerX = w - 80;
 		const int centerY = h - 70;
 		const int outerRadius = 50;
 		const int innerRadius = 5;
 		const float visualizerScale = 20.0f;
 
-		// Draw the outer boundary circle
 		SDL_SetRenderDrawColor(renderer, 100, 100, 120, 255);
 		DrawCircle(renderer, centerX, centerY, outerRadius);
 
-		// Draw the anti-deadzone inner circle (only in joystick mode)
 		if (!settings.mouse_mode && settings.anti_deathzone > 0.0f) {
 			int adzRadius = (int)(outerRadius * (settings.anti_deathzone / 100.0f));
 			if (adzRadius > 0) {
@@ -1453,13 +1666,11 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 			}
 		}
 
-		// Calculate dot position based on raw gyro input
 		const float x_multiplier = settings.invert_gyro_x ? 1.0f : -1.0f;
 		const float y_multiplier = settings.invert_gyro_y ? -1.0f : 1.0f;
 		float dotX_offset = gyro_data[1] * visualizerScale * x_multiplier;
 		float dotY_offset = -gyro_data[0] * visualizerScale * y_multiplier;
 
-		// Clamp the dot to be within the outer circle
 		float distance = sqrtf(dotX_offset * dotX_offset + dotY_offset * dotY_offset);
 		if (distance > outerRadius) {
 			dotX_offset = (dotX_offset / distance) * outerRadius;
@@ -1469,12 +1680,11 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		int dotX = centerX + (int)dotX_offset;
 		int dotY = centerY + (int)dotY_offset;
 
-		// Change color if aiming
 		if (gyro_is_active) {
-			SDL_SetRenderDrawColor(renderer, 255, 80, 80, 255); // Red when aiming
+			SDL_SetRenderDrawColor(renderer, 255, 80, 80, 255);
 		}
 		else {
-			SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255); // Default color
+			SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255);
 		}
 
 		DrawFilledCircle(renderer, dotX, dotY, innerRadius);
