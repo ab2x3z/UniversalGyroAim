@@ -1080,6 +1080,14 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			settings.selected_button = -1;
 			settings.selected_axis = -1;
 			isAiming = false;
+			// Clear shared data for mouse thread
+			EnterCriticalSection(&data_lock);
+			shared_mouse_aim_active = false;
+			shared_gyro_data[0] = 0.0f;
+			shared_gyro_data[1] = 0.0f;
+			shared_gyro_data[2] = 0.0f;
+			shared_flick_stick_delta_x = 0.0f;
+			LeaveCriticalSection(&data_lock);
 		}
 		break;
 
