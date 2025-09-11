@@ -1607,7 +1607,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 		if (settings.flick_stick_enabled) {
 			// --- Flick Stick Logic ---
-			const float FLICK_STICK_DEADZONE = 24000.0f;
+			const float FLICK_STICK_DEADZONE = 30000.0f;
 			float stick_magnitude = sqrtf((float)rx * rx + (float)ry * ry);
 
 			if (stick_magnitude > FLICK_STICK_DEADZONE) {
