@@ -9,6 +9,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -119,6 +120,75 @@ static Uint64 stability_timer_start_time = 0;
 static float flick_last_angle = 0.0f;
 static bool is_flick_stick_active = false;
 
+// --- Menu System State ---
+typedef struct {
+	const char* label;
+	// `direction` is -1 for Left, 1 for Right, 0 for Enter.
+	void (*execute)(int direction);
+	// Fills a buffer with the current value to display.
+	void (*display)(char* buffer, size_t size);
+} MenuItem;
+
+static int selected_menu_item = 0; // This is the cursor position on the VISIBLE menu
+static bool is_waiting_for_aim_button = false;
+static char active_menu_label[128] = { 0 };
+static bool settings_are_dirty = false;
+
+
+// --- Forward declarations for menu functions ---
+static bool reset_application(void);
+static void SaveSettings(void);
+void execute_mode(int direction);
+void display_mode(char* buffer, size_t size);
+void execute_sensitivity(int direction);
+void display_sensitivity(char* buffer, size_t size);
+void execute_flick_stick(int direction);
+void display_flick_stick(char* buffer, size_t size);
+void execute_always_on(int direction);
+void display_always_on(char* buffer, size_t size);
+void execute_anti_deadzone(int direction);
+void display_anti_deadzone(char* buffer, size_t size);
+void execute_invert_y(int direction);
+void display_invert_y(char* buffer, size_t size);
+void execute_invert_x(int direction);
+void display_invert_x(char* buffer, size_t size);
+void execute_change_aim_button(int direction);
+void display_change_aim_button(char* buffer, size_t size);
+void execute_calibrate_gyro(int direction);
+void display_gyro_calibration(char* buffer, size_t size);
+void execute_calibrate_flick(int direction);
+void display_flick_calibration(char* buffer, size_t size);
+void execute_change_led(int direction);
+void display_led_color(char* buffer, size_t size);
+void execute_hide_controller(int direction);
+void display_hide_controller(char* buffer, size_t size);
+void execute_save_settings(int direction);
+void display_save_status(char* buffer, size_t size);
+void execute_reset_app(int direction);
+
+// --- Menu Definition (Master List) ---
+static MenuItem menu_items[] = {
+	{ "Mode",                  execute_mode,                display_mode },
+	{ "Sensitivity",           execute_sensitivity,         display_sensitivity },
+	{ "Always-On Gyro",        execute_always_on,           display_always_on },
+	{ "Flick Stick",           execute_flick_stick,         display_flick_stick },
+	{ "Anti-Deadzone",         execute_anti_deadzone,       display_anti_deadzone },
+	{ "Invert Gyro Y",         execute_invert_y,            display_invert_y },
+	{ "Invert Gyro X",         execute_invert_x,            display_invert_x },
+	{ "Aim Button",            execute_change_aim_button,   display_change_aim_button },
+	{ "Calibrate Gyro",        execute_calibrate_gyro,      display_gyro_calibration },
+	{ "Calibrate Flick Stick", execute_calibrate_flick,     display_flick_calibration },
+	{ "LED Color",             execute_change_led,          display_led_color },
+	{ "Hide Controller",       execute_hide_controller,     display_hide_controller },
+	{ "Save Settings",         execute_save_settings,       display_save_status },
+	{ "Reset Application",     execute_reset_app,           NULL }
+};
+static const int master_num_menu_items = sizeof(menu_items) / sizeof(MenuItem);
+
+// --- Dynamic menu visibility state ---
+static int visible_menu_map[sizeof(menu_items) / sizeof(MenuItem)]; // Maps visible index to master index
+static int num_visible_menu_items = 0;
+
 
 // --- Mouse Thread for High-Frequency Input ---
 DWORD WINAPI MouseThread(LPVOID lpParam) {
@@ -223,6 +293,7 @@ static void SaveSettings(void) {
 		SDL_Log("Error: Failed to write settings to %s.", CONFIG_FILENAME);
 	}
 	else {
+		settings_are_dirty = false;
 		SDL_Log("Settings saved successfully to %s.", CONFIG_FILENAME);
 	}
 
@@ -262,6 +333,7 @@ static bool LoadSettings(void) {
 	}
 
 	settings = loaded_settings;
+	settings_are_dirty = false;
 	SDL_Log("Settings loaded successfully from %s.", CONFIG_FILENAME);
 	return true;
 }
@@ -744,11 +816,269 @@ static bool reset_application(void)
 	if (!LoadSettings()) {
 		SetDefaultSettings();
 	}
+	settings_are_dirty = false;
 
 	SDL_Log("--- RESET COMPLETE ---");
 	return true;
 }
 
+// --- Menu Action & Display Functions ---
+
+void execute_mode(int direction) {
+	if (direction == 0) { // Enter
+		settings.mouse_mode = !settings.mouse_mode;
+		settings_are_dirty = true;
+		SDL_Log("Mouse mode toggled %s.", settings.mouse_mode ? "ON" : "OFF");
+	}
+}
+void display_mode(char* buffer, size_t size) {
+	snprintf(buffer, size, "%s", settings.mouse_mode ? "Mouse" : "Joystick");
+}
+
+void execute_sensitivity(int direction) {
+	if (direction == 0) return; // Enter does nothing
+	float step = (direction > 0) ? 1.0f : -1.0f; // Right increases, Left decreases
+
+	if (settings.mouse_mode) {
+		settings.mouse_sensitivity += step * 500.0f;
+		settings.mouse_sensitivity = CLAMP(settings.mouse_sensitivity, 100.0f, 20000.0f);
+		SDL_Log("Mouse Sensitivity changed to %.1f", settings.mouse_sensitivity);
+	}
+	else {
+		settings.sensitivity += step * 0.5f;
+		settings.sensitivity = CLAMP(settings.sensitivity, 0.5f, 50.0f);
+		SDL_Log("Joystick Sensitivity changed to %.1f", settings.sensitivity);
+	}
+	settings_are_dirty = true;
+}
+void display_sensitivity(char* buffer, size_t size) {
+	if (settings.mouse_mode) {
+		snprintf(buffer, size, "%.0f", settings.mouse_sensitivity);
+	}
+	else {
+		snprintf(buffer, size, "%.1f", settings.sensitivity);
+	}
+}
+
+void execute_flick_stick(int direction) {
+	if (direction == 0) {
+		if (!settings.flick_stick_enabled) {
+			settings.flick_stick_enabled = true;
+			settings.always_on_gyro = true;
+			is_flick_stick_active = false;
+			flick_last_angle = 0.0f;
+			settings_are_dirty = true;
+			SDL_Log("Flick Stick enabled.");
+		}
+		else {
+			settings.flick_stick_enabled = false;
+			settings.always_on_gyro = false;
+			settings_are_dirty = true;
+			SDL_Log("Flick Stick disabled.");
+		}
+	}
+}
+void display_flick_stick(char* buffer, size_t size) {
+	snprintf(buffer, size, "%s", settings.flick_stick_enabled ? "ON" : "OFF");
+}
+
+void execute_always_on(int direction) {
+	if (direction == 0) {
+		if (settings.flick_stick_enabled) {
+			SDL_Log("Always-On Gyro is required for Flick Stick and cannot be disabled.");
+		}
+		else {
+			settings.always_on_gyro = !settings.always_on_gyro;
+			if (settings.always_on_gyro) {
+				isAiming = false;
+			}
+			settings_are_dirty = true;
+			SDL_Log("Always-on gyro toggled %s.", settings.always_on_gyro ? "ON" : "OFF");
+		}
+	}
+}
+void display_always_on(char* buffer, size_t size) {
+	snprintf(buffer, size, "%s", settings.always_on_gyro ? "ON" : "OFF");
+}
+
+void execute_anti_deadzone(int direction) {
+	if (direction == 0) return; // Enter does nothing
+	float step = (direction > 0) ? 1.0f : -1.0f;
+
+	settings.anti_deathzone += step * 1.0f;
+	settings.anti_deathzone = CLAMP(settings.anti_deathzone, 0.0f, 90.0f);
+	settings_are_dirty = true;
+	SDL_Log("Anti-Deadzone changed to %.0f%%", settings.anti_deathzone);
+}
+void display_anti_deadzone(char* buffer, size_t size) {
+	snprintf(buffer, size, "%.0f%%", settings.anti_deathzone);
+}
+
+void execute_invert_y(int direction) {
+	if (direction == 0) {
+		settings.invert_gyro_y = !settings.invert_gyro_y;
+		settings_are_dirty = true;
+		SDL_Log("Invert Gyro Y-Axis (Pitch) toggled %s.", settings.invert_gyro_y ? "ON" : "OFF");
+	}
+}
+void display_invert_y(char* buffer, size_t size) {
+	snprintf(buffer, size, "%s", settings.invert_gyro_y ? "ON" : "OFF");
+}
+
+void execute_invert_x(int direction) {
+	if (direction == 0) {
+		settings.invert_gyro_x = !settings.invert_gyro_x;
+		settings_are_dirty = true;
+		SDL_Log("Invert Gyro X-Axis (Yaw) toggled %s.", settings.invert_gyro_x ? "ON" : "OFF");
+	}
+}
+void display_invert_x(char* buffer, size_t size) {
+	snprintf(buffer, size, "%s", settings.invert_gyro_x ? "ON" : "OFF");
+}
+
+void execute_change_aim_button(int direction) {
+	if (direction == 0) {
+		is_waiting_for_aim_button = true;
+		settings.selected_button = -1;
+		settings.selected_axis = -1;
+		isAiming = false;
+		SDL_Log("Press a button or trigger on the gamepad to set as Aim.");
+	}
+}
+void display_change_aim_button(char* buffer, size_t size) {
+	if (is_waiting_for_aim_button) {
+		snprintf(buffer, size, "[Waiting for input...]");
+	}
+	else if (settings.selected_button != -1) {
+		snprintf(buffer, size, "%s", SDL_GetGamepadStringForButton(settings.selected_button));
+	}
+	else if (settings.selected_axis != -1) {
+		snprintf(buffer, size, "%s", SDL_GetGamepadStringForAxis(settings.selected_axis));
+	}
+	else {
+		snprintf(buffer, size, "[Not set]");
+	}
+}
+
+void execute_calibrate_gyro(int direction) {
+	if (direction == 0) {
+		if (gamepad && calibration_state == CALIBRATION_IDLE) {
+			calibration_state = CALIBRATION_WAITING_FOR_STABILITY;
+			stability_timer_start_time = 0;
+			SDL_Log("Starting gyro calibration... Waiting for controller to be still.");
+		}
+		else if (calibration_state != CALIBRATION_IDLE) {
+			SDL_Log("Another calibration is already in progress.");
+		}
+		else {
+			SDL_Log("Connect a controller to calibrate the gyro.");
+		}
+	}
+}
+void display_gyro_calibration(char* buffer, size_t size) {
+	snprintf(buffer, size, "P:%.3f Y:%.3f",
+		settings.gyro_calibration_offset[0],
+		settings.gyro_calibration_offset[1]);
+}
+void execute_calibrate_flick(int direction) {
+	if (direction == 0) {
+		if (gamepad && calibration_state == CALIBRATION_IDLE) {
+			calibration_state = FLICK_STICK_CALIBRATION_START;
+			SDL_Log("Starting Flick Stick calibration...");
+		}
+		else if (calibration_state != CALIBRATION_IDLE) {
+			SDL_Log("Another calibration is already in progress.");
+		}
+		else {
+			SDL_Log("Connect a controller to calibrate Flick Stick.");
+		}
+	}
+}
+void display_flick_calibration(char* buffer, size_t size) {
+	if (settings.flick_stick_calibrated) {
+		snprintf(buffer, size, "%.1f", settings.flick_stick_calibration_value);
+	}
+	else {
+		snprintf(buffer, size, "%.1f (Default)", settings.flick_stick_calibration_value);
+	}
+}
+
+void execute_change_led(int direction) {
+	if (direction == 0) {
+		is_entering_text = true;
+		hex_input_buffer[0] = '#';
+		hex_input_buffer[1] = '\0';
+		SDL_StartTextInput(window);
+		SDL_Log("Enter a 6-digit hex color code (e.g., #0088FF) and press Enter.");
+	}
+}
+void display_led_color(char* buffer, size_t size) {
+	if (is_entering_text) {
+		snprintf(buffer, size, "%s", hex_input_buffer);
+	}
+	else {
+		snprintf(buffer, size, "#%02X%02X%02X", settings.led_r, settings.led_g, settings.led_b);
+	}
+}
+
+void execute_hide_controller(int direction) {
+	if (direction == 0) {
+		if (gamepad) {
+			if (is_controller_hidden) {
+				UnhidePhysicalController();
+			}
+			else {
+				HidePhysicalController(gamepad);
+			}
+		}
+		else {
+			SDL_Log("No controller connected to hide/unhide.");
+		}
+	}
+}
+void display_hide_controller(char* buffer, size_t size) {
+	snprintf(buffer, size, "%s", is_controller_hidden ? "Hidden" : "Visible");
+}
+
+void execute_save_settings(int direction) {
+	if (direction == 0) {
+		SaveSettings();
+	}
+}
+void display_save_status(char* buffer, size_t size) {
+	const char* dirty_indicator = settings_are_dirty ? "*" : "";
+	FILE* file = fopen(CONFIG_FILENAME, "rb");
+	if (file) {
+		fclose(file);
+		char filename_base[128];
+		const char* dot = strrchr(CONFIG_FILENAME, '.');
+
+		if (dot) {
+			size_t len = dot - CONFIG_FILENAME;
+			strncpy_s(filename_base, sizeof(filename_base), CONFIG_FILENAME, len);
+		}
+		else {
+			strcpy_s(filename_base, sizeof(filename_base), CONFIG_FILENAME);
+		}
+
+		snprintf(buffer, size, "%s%s", filename_base, dirty_indicator);
+
+	}
+	else {
+		snprintf(buffer, size, "[No File]%s", dirty_indicator);
+	}
+}
+
+void execute_reset_app(int direction) {
+	if (direction == 0) {
+		if (!reset_application()) {
+			SDL_Event event;
+			SDL_zero(event);
+			event.type = SDL_EVENT_QUIT;
+			SDL_PushEvent(&event);
+		}
+	}
+}
 
 /* This function runs once at startup. */
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
@@ -760,7 +1090,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 		return SDL_APP_FAILURE;
 	}
 
-	if (!SDL_CreateWindowAndRenderer("Universal Gyro Aim", 460, 240, 0, &window, &renderer)) {
+	if (!SDL_CreateWindowAndRenderer("Universal Gyro Aim", 420, 185, 0, &window, &renderer)) {
 		SDL_Log("Couldn't create window and renderer: %s", SDL_GetError());
 		return SDL_APP_FAILURE;
 	}
@@ -833,7 +1163,7 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 		return SDL_APP_SUCCESS;
 
 	case SDL_EVENT_KEY_DOWN:
-		// --- Handle text input mode separately ---
+		// --- Handle states that take priority over menu navigation ---
 		if (is_entering_text) {
 			if (event->key.key == SDLK_BACKSPACE && strlen(hex_input_buffer) > 1) {
 				hex_input_buffer[strlen(hex_input_buffer) - 1] = '\0';
@@ -841,6 +1171,7 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			else if (event->key.key == SDLK_RETURN || event->key.key == SDLK_KP_ENTER) {
 				if (ParseHexColor(hex_input_buffer, &settings.led_r, &settings.led_g, &settings.led_b)) {
 					UpdatePhysicalControllerLED();
+					settings_are_dirty = true;
 				}
 				else {
 					SDL_Log("Invalid hex color format: %s", hex_input_buffer);
@@ -855,158 +1186,58 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			}
 			break; // Don't process other keys while typing
 		}
+		if (is_waiting_for_aim_button) {
+			if (event->key.key == SDLK_ESCAPE) {
+				is_waiting_for_aim_button = false;
+				SDL_Log("Aim button selection cancelled.");
+			}
+			break; // Ignore other keys while waiting for gamepad input
+		}
 
+		// --- Menu Navigation Logic (aware of visible items) ---
 		switch (event->key.key) {
-		case SDLK_H:
-			if (gamepad) {
-				if (is_controller_hidden) {
-					UnhidePhysicalController();
-				}
-				else {
-					HidePhysicalController(gamepad);
-				}
-			}
-			else {
-				SDL_Log("No controller connected to hide/unhide.");
-			}
-			break;
-		case SDLK_C:
-			SDL_Log("Change aim button requested. Press a button or trigger on the gamepad.");
-			settings.selected_button = -1;
-			settings.selected_axis = -1;
-			isAiming = false;
-			break;
-		case SDLK_T:
-			if (settings.flick_stick_enabled) {
-				SDL_Log("Always-On Gyro is required for Flick Stick and cannot be disabled.");
-			}
-			else {
-				settings.always_on_gyro = !settings.always_on_gyro;
-				if (settings.always_on_gyro) {
-					isAiming = false;
-				}
-				SDL_Log("Always-on gyro toggled %s.", settings.always_on_gyro ? "ON" : "OFF");
-			}
-			break;
-		case SDLK_M:
-			if (settings.flick_stick_enabled) {
-				SDL_Log("Cannot change to Joystick Mode while Flick Stick is active.");
-			}
-			else {
-				settings.mouse_mode = !settings.mouse_mode;
-				SDL_Log("Mouse mode toggled %s.", settings.mouse_mode ? "ON" : "OFF");
-			}
-			break;
-		case SDLK_F:
-			if (!settings.flick_stick_enabled) {
-				if (!settings.mouse_mode) {
-					SDL_Log("Flick Stick requires Mouse Mode. Press 'M' to enable it first.");
-				}
-				else {
-					settings.flick_stick_enabled = true;
-					settings.always_on_gyro = true;
-					is_flick_stick_active = false;
-					flick_last_angle = 0.0f;
-					SDL_Log("Flick Stick enabled. Always-On Gyro has been force-enabled.");
-				}
-			}
-			else {
-				settings.flick_stick_enabled = false;
-				settings.always_on_gyro = false;
-				SDL_Log("Flick Stick disabled. Always-On Gyro has been disabled.");
-			}
-			break;
-		case SDLK_I:
-			settings.invert_gyro_y = !settings.invert_gyro_y;
-			SDL_Log("Invert Gyro Y-Axis (Pitch) toggled %s.", settings.invert_gyro_y ? "ON" : "OFF");
-			break;
-		case SDLK_O:
-			settings.invert_gyro_x = !settings.invert_gyro_x;
-			SDL_Log("Invert Gyro X-Axis (Yaw) toggled %s.", settings.invert_gyro_x ? "ON" : "OFF");
-			break;
-		case SDLK_K:
-			if (gamepad && calibration_state == CALIBRATION_IDLE) {
-				calibration_state = CALIBRATION_WAITING_FOR_STABILITY;
-				stability_timer_start_time = 0;
-				SDL_Log("Starting gyro calibration... Waiting for controller to be still.");
-			}
-			else if (calibration_state != CALIBRATION_IDLE) {
-				SDL_Log("Another calibration is already in progress.");
-			}
-			else {
-				SDL_Log("Connect a controller to calibrate the gyro.");
-			}
-			break;
-		case SDLK_J:
-			if (gamepad && calibration_state == CALIBRATION_IDLE) {
-				if (!settings.mouse_mode) {
-					SDL_Log("Flick Stick calibration requires Mouse Mode to be enabled first (Press M).");
-				}
-				else {
-					calibration_state = FLICK_STICK_CALIBRATION_START;
-					SDL_Log("Starting Flick Stick calibration...");
-				}
-			}
-			else if (calibration_state != CALIBRATION_IDLE) {
-				SDL_Log("Another calibration is already in progress.");
-			}
-			else {
-				SDL_Log("Connect a controller to calibrate Flick Stick.");
-			}
-			break;
-		case SDLK_S:
-			SaveSettings();
-			break;
-		case SDLK_R:
-			if (!reset_application()) {
-				return SDL_APP_SUCCESS;
-			}
-			break;
-		case SDLK_L:
-			if (controller_has_led && !is_entering_text) {
-				is_entering_text = true;
-				hex_input_buffer[0] = '#';
-				hex_input_buffer[1] = '\0';
-				SDL_StartTextInput(window);
-				SDL_Log("Enter a 6-digit hex color code (e.g., #0088FF) and press Enter.");
-			}
-			break;
 		case SDLK_UP:
-			if (settings.mouse_mode) {
-				settings.mouse_sensitivity += 500.0f;
-				settings.mouse_sensitivity = CLAMP(settings.mouse_sensitivity, 100.0f, 20000.0f);
-				SDL_Log("Mouse Sensitivity increased to %.1f", settings.mouse_sensitivity);
-			}
-			else {
-				settings.sensitivity += 0.5f;
-				settings.sensitivity = CLAMP(settings.sensitivity, 0.5f, 50.0f);
-				SDL_Log("Joystick Sensitivity increased to %.1f", settings.sensitivity);
+			selected_menu_item--;
+			if (selected_menu_item < 0) {
+				selected_menu_item = num_visible_menu_items - 1;
 			}
 			break;
+
 		case SDLK_DOWN:
-			if (settings.mouse_mode) {
-				settings.mouse_sensitivity -= 500.0f;
-				settings.mouse_sensitivity = CLAMP(settings.mouse_sensitivity, 100.0f, 20000.0f);
-				SDL_Log("Mouse Sensitivity decreased to %.1f", settings.mouse_sensitivity);
-			}
-			else {
-				settings.sensitivity -= 0.5f;
-				settings.sensitivity = CLAMP(settings.sensitivity, 0.5f, 50.0f);
-				SDL_Log("Joystick Sensitivity decreased to %.1f", settings.sensitivity);
+			selected_menu_item++;
+			if (selected_menu_item >= num_visible_menu_items) {
+				selected_menu_item = 0;
 			}
 			break;
-		case SDLK_RIGHT:
-			if (!settings.mouse_mode) {
-				settings.anti_deathzone += 1.0f;
-				settings.anti_deathzone = CLAMP(settings.anti_deathzone, 0.0f, 90.0f);
-				SDL_Log("Anti-Deadzone increased to %.0f%%", settings.anti_deathzone);
-			}
-			break;
+
 		case SDLK_LEFT:
-			if (!settings.mouse_mode) {
-				settings.anti_deathzone -= 1.0f;
-				settings.anti_deathzone = CLAMP(settings.anti_deathzone, 0.0f, 90.0f);
-				SDL_Log("Anti-Deadzone decreased to %.0f%%", settings.anti_deathzone);
+			if (num_visible_menu_items > 0) {
+				int master_index = visible_menu_map[selected_menu_item];
+				strcpy_s(active_menu_label, sizeof(active_menu_label), menu_items[master_index].label);
+				if (menu_items[master_index].execute) {
+					menu_items[master_index].execute(-1);
+				}
+			}
+			break;
+
+		case SDLK_RIGHT:
+			if (num_visible_menu_items > 0) {
+				int master_index = visible_menu_map[selected_menu_item];
+				strcpy_s(active_menu_label, sizeof(active_menu_label), menu_items[master_index].label);
+				if (menu_items[master_index].execute) {
+					menu_items[master_index].execute(1);
+				}
+			}
+			break;
+
+		case SDLK_RETURN:
+		case SDLK_KP_ENTER:
+			if (num_visible_menu_items > 0) {
+				int master_index = visible_menu_map[selected_menu_item];
+				strcpy_s(active_menu_label, sizeof(active_menu_label), menu_items[master_index].label);
+				if (menu_items[master_index].execute) {
+					menu_items[master_index].execute(0);
+				}
 			}
 			break;
 		}
@@ -1094,7 +1325,16 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 	case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
 	case SDL_EVENT_GAMEPAD_BUTTON_UP:
 		if (event->gbutton.which == gamepad_instance_id) {
-			// --- Intercept buttons for Flick Stick calibration ---
+			// --- Intercept button for aim selection ---
+			if (is_waiting_for_aim_button && event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+				settings.selected_button = event->gbutton.button;
+				SDL_Log("Aim button set to: %s", SDL_GetGamepadStringForButton(settings.selected_button));
+				is_waiting_for_aim_button = false;
+				settings_are_dirty = true;
+				break;
+			}
+
+			// --- Intercept buttons for calibrations ---
 			bool button_handled = false;
 			if (event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
 				if (calibration_state == FLICK_STICK_CALIBRATION_START) {
@@ -1136,21 +1376,24 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 					}
 					else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST) { // 'B' to save and exit
 						settings.flick_stick_calibrated = true;
-						SaveSettings();
 						calibration_state = CALIBRATION_IDLE;
+						settings_are_dirty = true;
 						SDL_Log("Flick Stick calibration saved. Value: %.2f", settings.flick_stick_calibration_value);
 					}
 					button_handled = true;
+				}
+				else if (calibration_state == CALIBRATION_WAITING_FOR_STABILITY || calibration_state == CALIBRATION_SAMPLING) {
+					if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST) { // 'B' button to cancel
+						calibration_state = CALIBRATION_IDLE;
+						SDL_Log("Gyro calibration cancelled by user.");
+						button_handled = true;
+					}
 				}
 			}
 			if (button_handled) break;
 
 			// --- Normal button handling ---
-			if (settings.selected_button == -1 && settings.selected_axis == -1 && event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
-				settings.selected_button = event->gbutton.button;
-				SDL_Log("Aim button set to: %s", SDL_GetGamepadStringForButton(settings.selected_button));
-			}
-			else if (event->gbutton.button == settings.selected_button) {
+			if (event->gbutton.button == settings.selected_button) {
 				isAiming = (event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
 			}
 		}
@@ -1158,14 +1401,17 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 
 	case SDL_EVENT_GAMEPAD_AXIS_MOTION:
 		if (event->gaxis.which == gamepad_instance_id) {
-			if (settings.selected_button == -1 && settings.selected_axis == -1) {
+			if (is_waiting_for_aim_button) {
 				if (event->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ||
 					event->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) {
 					if (event->gaxis.value > 8000) {
 						settings.selected_axis = event->gaxis.axis;
 						SDL_Log("Aim trigger set to: %s", SDL_GetGamepadStringForAxis(settings.selected_axis));
+						is_waiting_for_aim_button = false;
+						settings_are_dirty = true;
 					}
 				}
+				break;
 			}
 			else if (event->gaxis.axis == settings.selected_axis) {
 				isAiming = (event->gaxis.value > 8000);
@@ -1244,6 +1490,44 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 	return SDL_APP_CONTINUE;
 }
 
+static void BuildVisibleMenu(void) {
+	num_visible_menu_items = 0;
+	for (int i = 0; i < master_num_menu_items; ++i) {
+		bool should_show = true;
+		const char* label = menu_items[i].label;
+
+		// --- Conditions to HIDE items ---
+		if (strcmp(label, "Mode") == 0 && settings.flick_stick_enabled) {
+			should_show = false;
+		}
+		else if (strcmp(label, "Always-On Gyro") == 0 && settings.flick_stick_enabled) {
+			should_show = false;
+		}
+		else if (strcmp(label, "Flick Stick") == 0 && !settings.mouse_mode) {
+			should_show = false;
+		}
+		else if (strcmp(label, "Calibrate Flick Stick") == 0 && !settings.flick_stick_enabled) {
+			should_show = false;
+		}
+		else if (strcmp(label, "Anti-Deadzone") == 0 && settings.mouse_mode) {
+			should_show = false;
+		}
+		else if (strcmp(label, "LED Color") == 0 && !controller_has_led) {
+			should_show = false;
+		}
+
+		if (should_show) {
+			visible_menu_map[num_visible_menu_items] = i;
+			num_visible_menu_items++;
+		}
+	}
+
+	// Clamp the cursor position to the new number of visible items
+	if (selected_menu_item >= num_visible_menu_items) {
+		selected_menu_item = num_visible_menu_items > 0 ? num_visible_menu_items - 1 : 0;
+	}
+}
+
 SDL_AppResult SDL_AppIterate(void* appstate)
 {
 	// --- Handle calibration completion ---
@@ -1252,6 +1536,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		settings.gyro_calibration_offset[1] = gyro_accumulator[1] / CALIBRATION_SAMPLES;
 		settings.gyro_calibration_offset[2] = gyro_accumulator[2] / CALIBRATION_SAMPLES;
 		calibration_state = CALIBRATION_IDLE;
+		settings_are_dirty = true;
 		SDL_Log("Calibration complete. Offsets saved.");
 		SDL_Log("-> Pitch: %.4f, Yaw: %.4f, Roll: %.4f",
 			settings.gyro_calibration_offset[0],
@@ -1414,29 +1699,57 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		return SDL_APP_CONTINUE;
 	}
 
-	// --- Normal UI ---
-	SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255);
+	int w = 0, h = 0;
+	SDL_GetRenderOutputSize(renderer, &w, &h);
+	const float line_height = (float)(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 4);
+	float y_pos;
 
+	// Build the list of visible menu items for this frame
+	BuildVisibleMenu();
+	if (active_menu_label[0] != '\0') {
+		for (int i = 0; i < num_visible_menu_items; ++i) {
+			if (strcmp(menu_items[visible_menu_map[i]].label, active_menu_label) == 0) {
+				selected_menu_item = i;
+				break;
+			}
+		}
+		// Clear the label so we don't do this again until the next action
+		active_menu_label[0] = '\0';
+	}
+
+	// --- Handle Special UI states ---
 	if (!gamepad) {
 		const char* message = "Waiting for physical controller...";
-		int w = 0, h = 0;
-		SDL_GetRenderOutputSize(renderer, &w, &h);
 		float x = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * SDL_strlen(message)) / 2.0f;
 		float y = (h - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE) / 2.0f;
+		SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255);
 		SDL_RenderDebugText(renderer, x, y, message);
 	}
+	else if (is_waiting_for_aim_button) {
+		y_pos = (h - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * 3) / 2.0f;
+		const char* msg1 = "SET AIM BUTTON";
+		const char* msg2 = "Press a button or pull a trigger on your controller.";
+		const char* msg3 = "Press ESC to cancel.";
+		float x1 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * SDL_strlen(msg1)) / 2.0f;
+		float x2 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * SDL_strlen(msg2)) / 2.0f;
+		float x3 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * SDL_strlen(msg3)) / 2.0f;
+		SDL_SetRenderDrawColor(renderer, 255, 255, 100, 255);
+		SDL_RenderDebugText(renderer, x1, y_pos, msg1);
+		y_pos += line_height * 1.5f;
+		SDL_RenderDebugText(renderer, x2, y_pos, msg2);
+		y_pos += line_height;
+		SDL_RenderDebugText(renderer, x3, y_pos, msg3);
+	}
 	else if (calibration_state != CALIBRATION_IDLE) {
-		int w = 0, h = 0;
-		SDL_GetRenderOutputSize(renderer, &w, &h);
-		float y_pos = (h - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * 7) / 2.0f;
-		float line_height = (float)(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 4);
+		y_pos = (h - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * 7) / 2.0f;
 		char buffer[128];
-
 		SDL_SetRenderDrawColor(renderer, 0, 128, 255, 255);
 
 		if (calibration_state == CALIBRATION_WAITING_FOR_STABILITY) {
 			const char* msg1 = "GYRO CALIBRATION: WAITING FOR STABILITY...";
+			const char* msg2 = "Press (B) on controller to cancel.";
 			float x1 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg1)) / 2.0f;
+			float x_cancel = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg2)) / 2.0f;
 			SDL_RenderDebugText(renderer, x1, y_pos, msg1);
 			y_pos += line_height;
 
@@ -1450,16 +1763,22 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 			}
 			float x2 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(buffer)) / 2.0f;
 			SDL_RenderDebugText(renderer, x2, y_pos, buffer);
+			y_pos += line_height * 1.5f;
+			SDL_RenderDebugText(renderer, x_cancel, y_pos, msg2);
 		}
 		else if (calibration_state == CALIBRATION_SAMPLING) {
 			snprintf(buffer, sizeof(buffer), "GYRO CALIBRATION: SAMPLING... (%d / %d)", calibration_sample_count, CALIBRATION_SAMPLES);
 			const char* msg2 = "Do not move the controller.";
+			const char* msg3 = "Press (B) on controller to cancel.";
 			float x1 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(buffer)) / 2.0f;
 			float x2 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg2)) / 2.0f;
+			float x3 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * strlen(msg3)) / 2.0f;
 
 			SDL_RenderDebugText(renderer, x1, y_pos, buffer);
 			y_pos += line_height;
 			SDL_RenderDebugText(renderer, x2, y_pos, msg2);
+			y_pos += line_height * 1.5f;
+			SDL_RenderDebugText(renderer, x3, y_pos, msg3);
 		}
 		else if (calibration_state == FLICK_STICK_CALIBRATION_START) {
 			const char* msg1 = "FLICK STICK CALIBRATION";
@@ -1471,7 +1790,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 			SDL_RenderDebugText(renderer, x1, y_pos, msg1);
 			y_pos += line_height * 1.5f;
 			SDL_RenderDebugText(renderer, x2, y_pos, msg2);
-			y_pos += line_height;
+			y_pos += line_height * 1.5f;
 			SDL_RenderDebugText(renderer, x3, y_pos, msg3);
 		}
 		else if (calibration_state == FLICK_STICK_CALIBRATION_TURNING) {
@@ -1507,163 +1826,53 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		}
 	}
 	else {
-		char buffer[256];
-		float y_pos = 10.0f;
-		const float line_height = (float)(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 4);
+		// --- Draw the Dynamic Menu ---
+		y_pos = 10.0f;
+		float x_label = 5.0f;
+		float x_value = 200.0f;
+		char label_buffer[128];
+		char value_buffer[128];
 
-		const char* status_message;
-		if (settings.mouse_mode) {
-			if (gyro_is_active) {
-				status_message = "Status: Aiming with Gyro (Mouse)";
-			}
-			else if (settings.flick_stick_enabled) {
-				status_message = "Status: OK (Flick Stick Mode)";
-			}
-			else {
-				status_message = "Status: OK (Mouse Mode)";
-			}
-		}
-		else if (settings.always_on_gyro) {
-			status_message = "Status: Gyro Always ON (Joystick)";
-		}
-		else if (isAiming) {
-			status_message = "Status: Aiming with Gyro (Joystick)";
-		}
-		else {
-			status_message = "Status: OK (Joystick)";
-		}
-		SDL_RenderDebugText(renderer, 10, y_pos, status_message);
-		y_pos += line_height;
+		for (int i = 0; i < num_visible_menu_items; ++i) {
+			int real_index = visible_menu_map[i];
+			bool is_selected = (i == selected_menu_item);
 
-		if (settings.selected_button != -1) {
-			snprintf(buffer, sizeof(buffer), "Aim Button: %s", SDL_GetGamepadStringForButton(settings.selected_button));
-		}
-		else if (settings.selected_axis != -1) {
-			snprintf(buffer, sizeof(buffer), "Aim Trigger: %s", SDL_GetGamepadStringForAxis(settings.selected_axis));
-		}
-		else {
-			snprintf(buffer, sizeof(buffer), "Aim Button: [Press a button/trigger]");
-		}
-		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
-		y_pos += line_height;
-
-		if (settings.mouse_mode) {
-			snprintf(buffer, sizeof(buffer), "Mouse Sensitivity: %.1f", settings.mouse_sensitivity);
-		}
-		else {
-			snprintf(buffer, sizeof(buffer), "Joystick Sensitivity: %.1f", settings.sensitivity);
-		}
-		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
-		y_pos += line_height;
-
-		if (settings.mouse_mode) {
-			snprintf(buffer, sizeof(buffer), "Flick Stick: %s (%s)",
-				settings.flick_stick_enabled ? "ON" : "OFF",
-				settings.flick_stick_calibrated ? "Calibrated" : "Needs Calibrating!");
-			SDL_RenderDebugText(renderer, 10, y_pos, buffer);
-			y_pos += line_height;
-		}
-		else {
-			snprintf(buffer, sizeof(buffer), "Anti-Deadzone: %.0f%%", settings.anti_deathzone);
-			SDL_RenderDebugText(renderer, 10, y_pos, buffer);
-			y_pos += line_height;
-		}
-
-		snprintf(buffer, sizeof(buffer), "Invert Gyro -> X-Axis: %s | Y-Axis: %s",
-			settings.invert_gyro_x ? "ON" : "OFF",
-			settings.invert_gyro_y ? "ON" : "OFF");
-		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
-		y_pos += line_height;
-
-		snprintf(buffer, sizeof(buffer), "Gyro Offset X: %.3f Y: %.3f", settings.gyro_calibration_offset[0], settings.gyro_calibration_offset[1]);
-		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
-		y_pos += line_height;
-
-		snprintf(buffer, sizeof(buffer), "HidHide status: %s", is_controller_hidden ? "Hidden" : "Visible");
-		SDL_RenderDebugText(renderer, 10, y_pos, buffer);
-		y_pos += line_height;
-
-		// --- Display LED color UI if supported ---
-		if (controller_has_led) {
-			if (is_entering_text) {
-				snprintf(buffer, sizeof(buffer), "New Color: %s", hex_input_buffer);
-				SDL_SetRenderDrawColor(renderer, 255, 255, 100, 255); // Yellow for input
+			if (is_selected) {
+				SDL_SetRenderDrawColor(renderer, 255, 255, 100, 255);
 			}
 			else {
-				snprintf(buffer, sizeof(buffer), "LED Color: #%02X%02X%02X", settings.led_r, settings.led_g, settings.led_b);
+				SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255);
 			}
-			SDL_RenderDebugText(renderer, 10, y_pos, buffer);
-			if (is_entering_text) {
-				SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255); // Reset color
+
+			// Prepare and draw the label
+			snprintf(label_buffer, sizeof(label_buffer), "%s%s",
+				is_selected ? ">" : " ",
+				menu_items[real_index].label);
+			SDL_RenderDebugText(renderer, x_label, y_pos, label_buffer);
+
+			// Prepare and draw the value, if a display function exists
+			if (menu_items[real_index].display) {
+				menu_items[real_index].display(value_buffer, sizeof(value_buffer));
+				SDL_RenderDebugText(renderer, x_value, y_pos, value_buffer);
 			}
-			y_pos += line_height;
-		}
 
-		if (!hidhide_found) {
-			y_pos += line_height;
-			SDL_SetRenderDrawColor(renderer, 255, 255, 100, 255); // Yellow
-			SDL_RenderDebugText(renderer, 10, y_pos, "Warning: HidHide not found.");
-			y_pos += line_height;
-			SDL_RenderDebugText(renderer, 10, y_pos, "You may experience double inputs in games.");
-			y_pos += line_height;
-			SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255); // Reset color
+			y_pos += line_height * 1.2f;
 		}
-
-		y_pos += line_height;
-
-
-		SDL_RenderDebugText(renderer, 10, y_pos, "--- Controls ---");
-		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " C:			       Change Aim Button");
-		y_pos += line_height;
-		if (!settings.flick_stick_enabled) {
-			SDL_RenderDebugText(renderer, 10, y_pos, " M:			       Toggle Mouse/Joystick Mode");
-			y_pos += line_height;
-		}
-		if (settings.mouse_mode) {
-			SDL_RenderDebugText(renderer, 10, y_pos, " F:			       Toggle Flick Stick");
-			y_pos += line_height;
-		}
-		if (!settings.flick_stick_enabled) {
-			SDL_RenderDebugText(renderer, 10, y_pos, " T:			       Toggle Always-On Gyro");
-			y_pos += line_height;
-		}
-		SDL_RenderDebugText(renderer, 10, y_pos, " I/O:								Invert Gyro Axis X/Y");
-		y_pos += line_height;
-		if (controller_has_led) {
-			SDL_RenderDebugText(renderer, 10, y_pos, " L:			       Change LED Color");
-			y_pos += line_height;
-		}
-		SDL_RenderDebugText(renderer, 10, y_pos, " Up/Down:				Adjust Sensitivity");
-		y_pos += line_height;
-		if (!settings.mouse_mode) {
-			SDL_RenderDebugText(renderer, 10, y_pos, " Left/Right:	Adjust Anti-Deadzone");
-			y_pos += line_height;
-		}
-		SDL_RenderDebugText(renderer, 10, y_pos, " H:			       Toggle Hiding Controller");
-		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " K:          Calibrate Gyro");
-		y_pos += line_height;
-		if (settings.flick_stick_enabled) {
-			SDL_RenderDebugText(renderer, 10, y_pos, " J:          Calibrate Flick Stick");
-			y_pos += line_height;
-		}
-		SDL_RenderDebugText(renderer, 10, y_pos, " S:			       Save Settings");
-		y_pos += line_height;
-		SDL_RenderDebugText(renderer, 10, y_pos, " R:			       Reset Application");
 
 
 		// --- Gyro Visualizer ---
-		int w, h;
-		SDL_GetRenderOutputSize(renderer, &w, &h);
-
-		const int centerX = w - 80;
-		const int centerY = h - 70;
+		const int centerX = w - 55;
+		const int centerY = 55;
 		const int outerRadius = 50;
 		const int innerRadius = 5;
 		const float visualizerScale = 20.0f;
 
-		SDL_SetRenderDrawColor(renderer, 100, 100, 120, 255);
+		if (settings.flick_stick_enabled) {
+			SDL_SetRenderDrawColor(renderer, 255, 80, 80, 255);
+		}
+		else {
+			SDL_SetRenderDrawColor(renderer, 100, 100, 120, 255);
+		}
 		DrawCircle(renderer, centerX, centerY, outerRadius);
 
 		if (!settings.mouse_mode && settings.anti_deathzone > 0.0f) {
