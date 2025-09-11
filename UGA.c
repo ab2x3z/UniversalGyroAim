@@ -77,6 +77,8 @@ static SDL_Window* window = NULL;
 static SDL_Renderer* renderer = NULL;
 static SDL_Gamepad* gamepad = NULL;
 static SDL_JoystickID gamepad_instance_id = 0;
+static bool is_window_focused = true;
+static bool force_one_render = false;
 
 static PVIGEM_CLIENT vigem_client = NULL;
 static PVIGEM_TARGET x360_pad = NULL;
@@ -252,11 +254,12 @@ DWORD WINAPI MouseThread(LPVOID lpParam) {
 			while (x_rem != 0 || y_rem != 0) {
 				long dx = 0;
 				long dy = 0;
-				
+
 				if (labs(x_rem) > labs(y_rem)) {
 					dx = (x_rem > 0) ? 1 : -1;
 					x_rem -= dx;
-				} else {
+				}
+				else {
 					dy = (y_rem > 0) ? 1 : -1;
 					y_rem -= dy;
 				}
@@ -1194,6 +1197,13 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 	case SDL_EVENT_QUIT:
 		return SDL_APP_SUCCESS;
 
+	case SDL_EVENT_WINDOW_FOCUS_GAINED:
+		is_window_focused = true;
+		break;
+	case SDL_EVENT_WINDOW_FOCUS_LOST:
+		is_window_focused = false;
+		break;
+
 	case SDL_EVENT_KEY_DOWN:
 		// --- Handle states that take priority over menu navigation ---
 		if (is_entering_text) {
@@ -1377,6 +1387,7 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 					}
 					else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST) { // 'B' button to cancel
 						calibration_state = CALIBRATION_IDLE;
+						force_one_render = true;
 						button_handled = true;
 					}
 				}
@@ -1409,6 +1420,7 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 					else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST) { // 'B' to save and exit
 						settings.flick_stick_calibrated = true;
 						calibration_state = CALIBRATION_IDLE;
+						force_one_render = true;
 						settings_are_dirty = true;
 						SDL_Log("Flick Stick calibration saved. Value: %.2f", settings.flick_stick_calibration_value);
 					}
@@ -1417,6 +1429,7 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 				else if (calibration_state == CALIBRATION_WAITING_FOR_STABILITY || calibration_state == CALIBRATION_SAMPLING) {
 					if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST) { // 'B' button to cancel
 						calibration_state = CALIBRATION_IDLE;
+						force_one_render = true;
 						SDL_Log("Gyro calibration cancelled by user.");
 						button_handled = true;
 					}
@@ -1568,6 +1581,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		settings.gyro_calibration_offset[1] = gyro_accumulator[1] / CALIBRATION_SAMPLES;
 		settings.gyro_calibration_offset[2] = gyro_accumulator[2] / CALIBRATION_SAMPLES;
 		calibration_state = CALIBRATION_IDLE;
+		force_one_render = true;
 		settings_are_dirty = true;
 		SDL_Log("Calibration complete. Offsets saved.");
 		SDL_Log("-> Pitch: %.4f, Yaw: %.4f, Roll: %.4f",
@@ -1710,6 +1724,15 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 	if (vigem_found && x360_pad && vigem_client) {
 		vigem_target_x360_update(vigem_client, x360_pad, report);
 	}
+
+
+	bool should_render = is_window_focused || (calibration_state != CALIBRATION_IDLE) || force_one_render;
+
+	if (!should_render) {
+		SDL_Delay(1);
+		return SDL_APP_CONTINUE;
+	}
+	force_one_render = false;
 
 	// --- Drawing UI ---
 	SDL_SetRenderDrawColor(renderer, 25, 25, 40, 255);
