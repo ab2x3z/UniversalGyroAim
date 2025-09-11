@@ -39,6 +39,8 @@
 #define GYRO_STABILITY_THRESHOLD 0.1f
 #define GYRO_STABILITY_DURATION_MS 3000
 
+#define MOUSE_INPUT_BATCH_SIZE 64
+
 // --- Calibration State Machine ---
 typedef enum {
 	CALIBRATION_IDLE,
@@ -240,12 +242,42 @@ DWORD WINAPI MouseThread(LPVOID lpParam) {
 		}
 
 		if (move_x != 0 || move_y != 0) {
-			INPUT input = { 0 };
-			input.type = INPUT_MOUSE;
-			input.mi.dx = move_x;
-			input.mi.dy = move_y;
-			input.mi.dwFlags = MOUSEEVENTF_MOVE;
-			SendInput(1, &input, sizeof(INPUT));
+			INPUT inputs[MOUSE_INPUT_BATCH_SIZE] = { 0 };
+			int batch_count = 0;
+
+			long x_rem = move_x; // Remaining X movement
+			long y_rem = move_y; // Remaining Y movement
+
+			// Continue until the entire movement has been processed
+			while (x_rem != 0 || y_rem != 0) {
+				long dx = 0;
+				long dy = 0;
+				
+				if (labs(x_rem) > labs(y_rem)) {
+					dx = (x_rem > 0) ? 1 : -1;
+					x_rem -= dx;
+				} else {
+					dy = (y_rem > 0) ? 1 : -1;
+					y_rem -= dy;
+				}
+
+				inputs[batch_count].type = INPUT_MOUSE;
+				inputs[batch_count].mi.dx = dx;
+				inputs[batch_count].mi.dy = dy;
+				inputs[batch_count].mi.dwFlags = MOUSEEVENTF_MOVE;
+				batch_count++;
+
+				// If the batch is full, send it and reset.
+				if (batch_count == MOUSE_INPUT_BATCH_SIZE) {
+					SendInput(batch_count, inputs, sizeof(INPUT));
+					batch_count = 0;
+				}
+			}
+
+			// Send any remaining inputs in the last (partially-filled) batch.
+			if (batch_count > 0) {
+				SendInput(batch_count, inputs, sizeof(INPUT));
+			}
 		}
 
 		Sleep(1);
@@ -1607,7 +1639,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 		if (settings.flick_stick_enabled) {
 			// --- Flick Stick Logic ---
-			const float FLICK_STICK_DEADZONE = 30000.0f;
+			const float FLICK_STICK_DEADZONE = 28000.0f;
 			float stick_magnitude = sqrtf((float)rx * rx + (float)ry * ry);
 
 			if (stick_magnitude > FLICK_STICK_DEADZONE) {
@@ -1908,6 +1940,8 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 	}
 
 	SDL_RenderPresent(renderer);
+
+	SDL_Delay(1);
 
 	return SDL_APP_CONTINUE;
 }
