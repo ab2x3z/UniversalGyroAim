@@ -1,6 +1,6 @@
 # Universal Gyro Aim
 
-Universal Gyro Aim is a simple utility for Windows that captures gyro data from a physical gamepad and maps it to the right analog stick of a virtual Xbox 360 controller. This allows you to add motion-based aiming to games that support standard XInput controllers.
+Universal Gyro Aim is a utility for Windows that captures gyro data from a physical gamepad and maps it to either the right analog stick of a virtual Xbox 360 controller or directly to mouse movement. This allows you to add high-precision motion-based aiming to any game that supports standard XInput controllers or mouse input.
 
 The application uses the SDL3 library to read input from a wide range of physical controllers and the ViGEmBus driver to create the virtual Xbox 360 controller that games will recognize. To prevent double input issues, it also uses HidHide to conceal the physical controller from games.
 
