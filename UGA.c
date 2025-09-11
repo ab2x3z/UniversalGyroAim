@@ -1651,8 +1651,8 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 				EnterCriticalSection(&data_lock);
 				shared_mouse_aim_active = use_gyro_for_aim;
 				LeaveCriticalSection(&data_lock);
-				report.sThumbRX = 0;
-				report.sThumbRY = 0;
+				report.sThumbRX = rx;
+				report.sThumbRY = (ry == -32768) ? 32767 : -ry;
 			}
 			else { // Joystick Mode
 				float combined_x = (float)rx;
