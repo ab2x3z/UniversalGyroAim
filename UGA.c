@@ -1605,7 +1605,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		Sint16 rx = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
 		Sint16 ry = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
 
-		if (settings.flick_stick_enabled && settings.flick_stick_calibrated && calibration_state == CALIBRATION_IDLE) {
+		if (settings.flick_stick_enabled) {
 			// --- Flick Stick Logic ---
 			const float FLICK_STICK_DEADZONE = 24000.0f;
 			float stick_magnitude = sqrtf((float)rx * rx + (float)ry * ry);
