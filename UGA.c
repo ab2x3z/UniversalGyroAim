@@ -1650,6 +1650,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 					float flick_angle = current_angle - ((float)M_PI / 2.0f);
 					while (flick_angle <= -(float)M_PI) flick_angle += (2.0f * (float)M_PI);
 					while (flick_angle > (float)M_PI) flick_angle -= (2.0f * (float)M_PI);
+					flick_angle = CLAMP(flick_angle, -(float)M_PI / 2.0f, (float)M_PI / 2.0f);
 					flick_stick_output_x = -(flick_angle / (float)M_PI) * (settings.flick_stick_calibration_value / 2.0f);
 				}
 				else {
