@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -23,6 +24,7 @@
 #pragma comment(lib, "shlwapi.lib")
 #include <ShlObj.h>
 #pragma comment(lib, "winmm.lib")
+#include <direct.h>
 
 #define CLAMP(v, min, max) (((v) < (min)) ? (min) : (((v) > (max)) ? (max) : (v)))
 
@@ -30,8 +32,9 @@
 #define VIRTUAL_VENDOR_ID  0xFEED
 #define VIRTUAL_PRODUCT_ID 0xBEEF
 
-// --- Configuration file ---
-#define CONFIG_FILENAME "uga_config.dat"
+// --- Configuration files ---
+#define PROFILES_DIRECTORY "UGA_profiles"
+#define DEFAULT_PROFILE_FILENAME "default.ini"
 #define CURRENT_CONFIG_VERSION 1
 
 // --- Calibration Settings ---
@@ -112,6 +115,14 @@ static volatile bool shared_mouse_aim_active = false;
 // --- Text Input State ---
 static bool is_entering_text = false;
 static char hex_input_buffer[8] = { 0 };
+static bool is_entering_save_filename = false;
+static char filename_input_buffer[64] = { 0 };
+
+// --- Profile Loading State ---
+static bool is_choosing_profile = false;
+static char** profile_filenames = NULL;
+static int num_profiles = 0;
+static int selected_profile_index = 0;
 
 // --- Calibration State ---
 static CalibrationState calibration_state = CALIBRATION_IDLE;
@@ -137,11 +148,12 @@ static int selected_menu_item = 0; // This is the cursor position on the VISIBLE
 static bool is_waiting_for_aim_button = false;
 static char active_menu_label[128] = { 0 };
 static bool settings_are_dirty = false;
+static char current_profile_name[64] = DEFAULT_PROFILE_FILENAME;
 
 
 // --- Forward declarations for menu functions ---
 static bool reset_application(void);
-static void SaveSettings(void);
+static bool ParseHexColor(const char* hex_string, unsigned char* r, unsigned char* g, unsigned char* b);
 void execute_mode(int direction);
 void display_mode(char* buffer, size_t size);
 void execute_sensitivity(int direction);
@@ -166,8 +178,9 @@ void execute_change_led(int direction);
 void display_led_color(char* buffer, size_t size);
 void execute_hide_controller(int direction);
 void display_hide_controller(char* buffer, size_t size);
-void execute_save_settings(int direction);
-void display_save_status(char* buffer, size_t size);
+void execute_load_profile(int direction);
+void execute_save_profile(int direction);
+void display_current_profile(char* buffer, size_t size);
 void execute_reset_app(int direction);
 
 // --- Menu Definition (Master List) ---
@@ -184,7 +197,8 @@ static MenuItem menu_items[] = {
 	{ "Calibrate Flick Stick", execute_calibrate_flick,     display_flick_calibration },
 	{ "LED Color",             execute_change_led,          display_led_color },
 	{ "Hide Controller",       execute_hide_controller,     display_hide_controller },
-	{ "Save Settings",         execute_save_settings,       display_save_status },
+	{ "Load Profile",          execute_load_profile,        NULL },
+	{ "Save Profile",          execute_save_profile,        display_current_profile },
 	{ "Reset Application",     execute_reset_app,           NULL }
 };
 static const int master_num_menu_items = sizeof(menu_items) / sizeof(MenuItem);
@@ -294,6 +308,21 @@ DWORD WINAPI MouseThread(LPVOID lpParam) {
 
 // --- Settings Management Functions ---
 
+static bool GetProfilesDir(char* path_buffer, size_t buffer_size)
+{
+	if (GetModuleFileNameA(NULL, path_buffer, (DWORD)buffer_size) == 0) {
+		return false;
+	}
+	PathRemoveFileSpecA(path_buffer);
+
+	if (PathAppendA(path_buffer, PROFILES_DIRECTORY) == FALSE) {
+		return false;
+	}
+	_mkdir(path_buffer);
+
+	return true;
+}
+
 static void SetDefaultSettings(void) {
 	SDL_Log("Loading default settings.");
 	settings.selected_button = -1;
@@ -317,59 +346,211 @@ static void SetDefaultSettings(void) {
 	settings.flick_stick_calibration_value = 12000.0f;
 }
 
-static void SaveSettings(void) {
-	FILE* file = fopen(CONFIG_FILENAME, "wb");
-	if (!file) {
-		SDL_Log("Error: Could not open %s for writing.", CONFIG_FILENAME);
+// Helper to convert string to SDL_GamepadButton (reverse of SDL_GetGamepadStringForButton)
+static SDL_GamepadButton GamepadButtonFromString(const char* str) {
+	if (!str) return SDL_GAMEPAD_BUTTON_INVALID;
+	for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; ++i) {
+		const char* btn_str = SDL_GetGamepadStringForButton((SDL_GamepadButton)i);
+		if (btn_str && _stricmp(str, btn_str) == 0) {
+			return (SDL_GamepadButton)i;
+		}
+	}
+	return SDL_GAMEPAD_BUTTON_INVALID;
+}
+
+// Helper to convert string to SDL_GamepadAxis
+static SDL_GamepadAxis GamepadAxisFromString(const char* str) {
+	if (!str) return SDL_GAMEPAD_AXIS_INVALID;
+	for (int i = 0; i < SDL_GAMEPAD_AXIS_COUNT; ++i) {
+		const char* axis_str = SDL_GetGamepadStringForAxis((SDL_GamepadAxis)i);
+		if (axis_str && _stricmp(str, axis_str) == 0) {
+			return (SDL_GamepadAxis)i;
+		}
+	}
+	return SDL_GAMEPAD_AXIS_INVALID;
+}
+
+
+static void SaveSettings(const char* profile_name) {
+	char dir_path[MAX_PATH];
+	if (!GetProfilesDir(dir_path, MAX_PATH)) {
+		SDL_Log("Error: Could not determine profiles directory path.");
 		return;
 	}
 
-	if (fwrite(&settings, sizeof(AppSettings), 1, file) != 1) {
-		SDL_Log("Error: Failed to write settings to %s.", CONFIG_FILENAME);
+	char full_path[MAX_PATH];
+	PathCombineA(full_path, dir_path, profile_name);
+	// Ensure it has our extension
+	if (!PathMatchSpecA(full_path, "*.ini")) {
+		strcat_s(full_path, MAX_PATH, ".ini");
+	}
+
+	FILE* file;
+	if (fopen_s(&file, full_path, "w") != 0 || !file) {
+		SDL_Log("Error: Could not open %s for writing.", full_path);
+		return;
+	}
+
+	// Write header
+	fprintf(file, "# Universal Gyro Aim Profile: %s\n", profile_name);
+	fprintf(file, "config_version = %d\n\n", CURRENT_CONFIG_VERSION);
+
+	// General settings
+	fprintf(file, "mouse_mode = %s\n", settings.mouse_mode ? "true" : "false");
+	fprintf(file, "sensitivity = %f\n", settings.sensitivity);
+	fprintf(file, "mouse_sensitivity = %f\n", settings.mouse_sensitivity);
+	fprintf(file, "always_on_gyro = %s\n", settings.always_on_gyro ? "true" : "false");
+	fprintf(file, "invert_gyro_x = %s\n", settings.invert_gyro_x ? "true" : "false");
+	fprintf(file, "invert_gyro_y = %s\n", settings.invert_gyro_y ? "true" : "false");
+	fprintf(file, "anti_deadzone = %f\n", settings.anti_deathzone);
+
+	// Aim button
+	if (settings.selected_button != -1) {
+		fprintf(file, "aim_input_type = button\n");
+		fprintf(file, "aim_input_value = %s\n", SDL_GetGamepadStringForButton(settings.selected_button));
+	}
+	else if (settings.selected_axis != -1) {
+		fprintf(file, "aim_input_type = axis\n");
+		fprintf(file, "aim_input_value = %s\n", SDL_GetGamepadStringForAxis(settings.selected_axis));
 	}
 	else {
-		settings_are_dirty = false;
-		SDL_Log("Settings saved successfully to %s.", CONFIG_FILENAME);
+		fprintf(file, "aim_input_type = none\n");
 	}
 
+	// LED color
+	fprintf(file, "led_color = #%02X%02X%02X\n", settings.led_r, settings.led_g, settings.led_b);
+
+	// Gyro calibration
+	fprintf(file, "gyro_offset_pitch = %f\n", settings.gyro_calibration_offset[0]);
+	fprintf(file, "gyro_offset_yaw = %f\n", settings.gyro_calibration_offset[1]);
+	fprintf(file, "gyro_offset_roll = %f\n", settings.gyro_calibration_offset[2]);
+
+	// Flick stick
+	fprintf(file, "flick_stick_enabled = %s\n", settings.flick_stick_enabled ? "true" : "false");
+	fprintf(file, "flick_stick_calibrated = %s\n", settings.flick_stick_calibrated ? "true" : "false");
+	fprintf(file, "flick_stick_value = %f\n", settings.flick_stick_calibration_value);
+
 	fclose(file);
+	settings_are_dirty = false;
+	strcpy_s(current_profile_name, sizeof(current_profile_name), profile_name);
+	SDL_Log("Settings saved successfully to %s.", full_path);
 }
 
-static bool LoadSettings(void) {
-	FILE* file = fopen(CONFIG_FILENAME, "rb");
-	if (!file) {
-		SDL_Log("Info: No config file found (%s). Using defaults.", CONFIG_FILENAME);
+static bool LoadSettings(const char* profile_name) {
+	char dir_path[MAX_PATH];
+	if (!GetProfilesDir(dir_path, MAX_PATH)) {
+		SDL_Log("Error: Could not determine profiles directory path for loading.");
 		return false;
 	}
 
-	AppSettings loaded_settings;
-	if (fread(&loaded_settings, sizeof(loaded_settings), 1, file) != 1) {
-		fseek(file, 0, SEEK_END);
-		long file_size = ftell(file);
-		fclose(file);
-		if (file_size < sizeof(AppSettings)) {
-			SDL_Log("Warning: Config file is from an older version of the app. Using defaults.");
-		}
-		else {
-			SDL_Log("Error: Failed to read settings from %s. Using defaults.", CONFIG_FILENAME);
-		}
+	char full_path[MAX_PATH];
+	PathCombineA(full_path, dir_path, profile_name);
+	if (!PathMatchSpecA(full_path, "*.ini")) {
+		strcat_s(full_path, MAX_PATH, ".ini");
+	}
+
+	FILE* file;
+	if (fopen_s(&file, full_path, "r") != 0 || !file) {
+		SDL_Log("Info: No profile file found (%s).", full_path);
 		return false;
+	}
+
+	SetDefaultSettings();
+
+	char line[256];
+	char key[64];
+	char value[192];
+	char aim_type[32] = "none";
+
+	while (fgets(line, sizeof(line), file)) {
+		// Skip comments and empty lines
+		if (line[0] == '#' || line[0] == '\n' || line[0] == '\r' || line[0] == '[') continue;
+
+		// Parse key-value pair
+		if (sscanf_s(line, " %63[^= \t] = %191[^\n\r]", key, (unsigned)_countof(key), value, (unsigned)_countof(value)) != 2) {
+			continue;
+		}
+
+		// Trim trailing whitespace from value
+		char* end = value + strlen(value) - 1;
+		while (end > value && isspace((unsigned char)*end)) end--;
+		*(end + 1) = 0;
+
+		// --- Map keys to settings struct members ---
+		if (_stricmp(key, "config_version") == 0) {
+			if (atoi(value) != CURRENT_CONFIG_VERSION) {
+				SDL_Log("Warning: Profile version mismatch in %s. Expected %d, got %s.", profile_name, CURRENT_CONFIG_VERSION, value);
+			}
+		}
+		else if (_stricmp(key, "mouse_mode") == 0) {
+			settings.mouse_mode = (_stricmp(value, "true") == 0);
+		}
+		else if (_stricmp(key, "sensitivity") == 0) {
+			settings.sensitivity = (float)atof(value);
+		}
+		else if (_stricmp(key, "mouse_sensitivity") == 0) {
+			settings.mouse_sensitivity = (float)atof(value);
+		}
+		else if (_stricmp(key, "always_on_gyro") == 0) {
+			settings.always_on_gyro = (_stricmp(value, "true") == 0);
+		}
+		else if (_stricmp(key, "invert_gyro_x") == 0) {
+			settings.invert_gyro_x = (_stricmp(value, "true") == 0);
+		}
+		else if (_stricmp(key, "invert_gyro_y") == 0) {
+			settings.invert_gyro_y = (_stricmp(value, "true") == 0);
+		}
+		else if (_stricmp(key, "anti_deadzone") == 0) {
+			settings.anti_deathzone = (float)atof(value);
+		}
+		else if (_stricmp(key, "aim_input_type") == 0) {
+			strcpy_s(aim_type, sizeof(aim_type), value);
+		}
+		else if (_stricmp(key, "aim_input_value") == 0) {
+			if (_stricmp(aim_type, "button") == 0) {
+				settings.selected_button = GamepadButtonFromString(value);
+				settings.selected_axis = -1;
+			}
+			else if (_stricmp(aim_type, "axis") == 0) {
+				settings.selected_axis = GamepadAxisFromString(value);
+				settings.selected_button = -1;
+			}
+		}
+		else if (_stricmp(key, "led_color") == 0) {
+			ParseHexColor(value, &settings.led_r, &settings.led_g, &settings.led_b);
+		}
+		else if (_stricmp(key, "gyro_offset_pitch") == 0) {
+			settings.gyro_calibration_offset[0] = (float)atof(value);
+		}
+		else if (_stricmp(key, "gyro_offset_yaw") == 0) {
+			settings.gyro_calibration_offset[1] = (float)atof(value);
+		}
+		else if (_stricmp(key, "gyro_offset_roll") == 0) {
+			settings.gyro_calibration_offset[2] = (float)atof(value);
+		}
+		else if (_stricmp(key, "flick_stick_enabled") == 0) {
+			settings.flick_stick_enabled = (_stricmp(value, "true") == 0);
+		}
+		else if (_stricmp(key, "flick_stick_calibrated") == 0) {
+			settings.flick_stick_calibrated = (_stricmp(value, "true") == 0);
+		}
+		else if (_stricmp(key, "flick_stick_value") == 0) {
+			settings.flick_stick_calibration_value = (float)atof(value);
+		}
 	}
 
 	fclose(file);
 
-	if (loaded_settings.config_version != CURRENT_CONFIG_VERSION) {
-		SDL_Log("Warning: Config file version mismatch. Expected %d, got %d. Using defaults.", CURRENT_CONFIG_VERSION, loaded_settings.config_version);
-		return false;
+	if (settings.flick_stick_enabled) {
+		settings.always_on_gyro = true;
 	}
 
-	if (loaded_settings.flick_stick_enabled) {
-		loaded_settings.always_on_gyro = true;
-	}
-
-	settings = loaded_settings;
 	settings_are_dirty = false;
-	SDL_Log("Settings loaded successfully from %s.", CONFIG_FILENAME);
+	char profile_name_no_ext[64];
+	strcpy_s(profile_name_no_ext, sizeof(profile_name_no_ext), profile_name);
+	PathRemoveExtensionA(profile_name_no_ext);
+	strcpy_s(current_profile_name, sizeof(current_profile_name), profile_name_no_ext);
+	SDL_Log("Settings loaded successfully from %s.", full_path);
 	return true;
 }
 
@@ -848,7 +1029,7 @@ static bool reset_application(void)
 	find_and_open_physical_gamepad();
 
 	// 5. Load settings from file (or use defaults)
-	if (!LoadSettings()) {
+	if (!LoadSettings(DEFAULT_PROFILE_FILENAME)) {
 		SetDefaultSettings();
 	}
 	settings_are_dirty = false;
@@ -858,6 +1039,58 @@ static bool reset_application(void)
 }
 
 // --- Menu Action & Display Functions ---
+
+// Helper to free profile list memory
+static void FreeProfileList() {
+	if (profile_filenames) {
+		for (int i = 0; i < num_profiles; ++i) {
+			free(profile_filenames[i]);
+		}
+		free(profile_filenames);
+		profile_filenames = NULL;
+	}
+	num_profiles = 0;
+}
+
+// Helper to scan for .ini files in the profiles directory
+static void ScanForProfiles() {
+	FreeProfileList(); // Clear old list first
+
+	char search_path[MAX_PATH];
+	if (!GetProfilesDir(search_path, MAX_PATH)) {
+		return;
+	}
+	PathAppendA(search_path, "*.ini");
+
+	WIN32_FIND_DATAA find_data;
+	HANDLE find_handle = FindFirstFileA(search_path, &find_data);
+
+	if (find_handle == INVALID_HANDLE_VALUE) {
+		return;
+	}
+
+	char** temp_list = NULL;
+	int capacity = 0;
+
+	do {
+		if (!(find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+			if (num_profiles >= capacity) {
+				capacity = (capacity == 0) ? 8 : capacity * 2;
+				temp_list = (char**)realloc(profile_filenames, capacity * sizeof(char*));
+				if (!temp_list) {
+					FindClose(find_handle);
+					FreeProfileList();
+					return;
+				}
+				profile_filenames = temp_list;
+			}
+			profile_filenames[num_profiles] = _strdup(find_data.cFileName);
+			num_profiles++;
+		}
+	} while (FindNextFileA(find_handle, &find_data) != 0);
+
+	FindClose(find_handle);
+}
 
 void execute_mode(int direction) {
 	if (direction == 0) { // Enter
@@ -1075,33 +1308,32 @@ void display_hide_controller(char* buffer, size_t size) {
 	snprintf(buffer, size, "%s", is_controller_hidden ? "Hidden" : "Visible");
 }
 
-void execute_save_settings(int direction) {
+void execute_load_profile(int direction) {
 	if (direction == 0) {
-		SaveSettings();
-	}
-}
-void display_save_status(char* buffer, size_t size) {
-	const char* dirty_indicator = settings_are_dirty ? "*" : "";
-	FILE* file = fopen(CONFIG_FILENAME, "rb");
-	if (file) {
-		fclose(file);
-		char filename_base[128];
-		const char* dot = strrchr(CONFIG_FILENAME, '.');
-
-		if (dot) {
-			size_t len = dot - CONFIG_FILENAME;
-			strncpy_s(filename_base, sizeof(filename_base), CONFIG_FILENAME, len);
+		ScanForProfiles();
+		if (num_profiles > 0) {
+			is_choosing_profile = true;
+			selected_profile_index = 0;
 		}
 		else {
-			strcpy_s(filename_base, sizeof(filename_base), CONFIG_FILENAME);
+			SDL_Log("No profiles found to load.");
 		}
-
-		snprintf(buffer, size, "%s%s", filename_base, dirty_indicator);
-
 	}
-	else {
-		snprintf(buffer, size, "[No File]%s", dirty_indicator);
+}
+
+void execute_save_profile(int direction) {
+	if (direction == 0) {
+		is_entering_save_filename = true;
+		// Pre-fill buffer with current profile name
+		strcpy_s(filename_input_buffer, sizeof(filename_input_buffer), current_profile_name);
+		SDL_StartTextInput(window);
+		SDL_Log("Enter a profile name and press Enter.");
 	}
+}
+
+void display_current_profile(char* buffer, size_t size) {
+	const char* dirty_indicator = settings_are_dirty ? "*" : "";
+	snprintf(buffer, size, "%s%s", current_profile_name, dirty_indicator);
 }
 
 void execute_reset_app(int direction) {
@@ -1172,8 +1404,9 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 		}
 	}
 
-	if (!LoadSettings()) {
+	if (!LoadSettings(DEFAULT_PROFILE_FILENAME)) {
 		SetDefaultSettings();
+		SaveSettings(DEFAULT_PROFILE_FILENAME); // Create a default profile on first launch
 	}
 
 	// --- Initialize and start the mouse thread ---
@@ -1206,6 +1439,49 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 
 	case SDL_EVENT_KEY_DOWN:
 		// --- Handle states that take priority over menu navigation ---
+		if (is_entering_save_filename) {
+			if (event->key.key == SDLK_BACKSPACE && strlen(filename_input_buffer) > 0) {
+				filename_input_buffer[strlen(filename_input_buffer) - 1] = '\0';
+			}
+			else if (event->key.key == SDLK_RETURN || event->key.key == SDLK_KP_ENTER) {
+				if (strlen(filename_input_buffer) > 0) {
+					SaveSettings(filename_input_buffer);
+				}
+				is_entering_save_filename = false;
+				SDL_StopTextInput(window);
+			}
+			else if (event->key.key == SDLK_ESCAPE) {
+				is_entering_save_filename = false;
+				SDL_StopTextInput(window);
+			}
+			break; // Consume event
+		}
+
+		if (is_choosing_profile) {
+			switch (event->key.key) {
+			case SDLK_UP:
+				selected_profile_index--;
+				if (selected_profile_index < 0) selected_profile_index = num_profiles - 1;
+				break;
+			case SDLK_DOWN:
+				selected_profile_index++;
+				if (selected_profile_index >= num_profiles) selected_profile_index = 0;
+				break;
+			case SDLK_RETURN:
+			case SDLK_KP_ENTER:
+				if (num_profiles > 0) {
+					LoadSettings(profile_filenames[selected_profile_index]);
+					UpdatePhysicalControllerLED(); // Apply new LED color
+				}
+				// Fall-through to exit state
+			case SDLK_ESCAPE:
+				is_choosing_profile = false;
+				FreeProfileList();
+				break;
+			}
+			break; // Consume event
+		}
+
 		if (is_entering_text) {
 			if (event->key.key == SDLK_BACKSPACE && strlen(hex_input_buffer) > 1) {
 				hex_input_buffer[strlen(hex_input_buffer) - 1] = '\0';
@@ -1289,6 +1565,19 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 		if (is_entering_text) {
 			if (strlen(hex_input_buffer) < 7) {
 				strcat_s(hex_input_buffer, sizeof(hex_input_buffer), event->text.text);
+			}
+		}
+		else if (is_entering_save_filename) {
+			// Prevent buffer overflow and invalid characters
+			if (strlen(filename_input_buffer) < sizeof(filename_input_buffer) - 1) {
+				char* c = event->text.text;
+				while (*c) {
+					// A simple filter for valid filename characters
+					if (isalnum((unsigned char)*c) || *c == '_' || *c == '-' || *c == ' ') {
+						strncat_s(filename_input_buffer, sizeof(filename_input_buffer), c, 1);
+					}
+					c++;
+				}
 			}
 		}
 		break;
@@ -1597,8 +1886,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 			settings.gyro_calibration_offset[2]);
 	}
 
-	XUSB_REPORT report;
-	XUSB_REPORT_INIT(&report);
+	XUSB_REPORT report = { 0 };
 
 	bool gyro_is_active = false;
 	float flick_stick_output_x = 0.0f;
@@ -1802,6 +2090,46 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 		y_pos += line_height;
 		SDL_RenderDebugText(renderer, x3, y_pos, msg3);
 	}
+	else if (is_entering_save_filename) {
+		y_pos = (h - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * 4) / 2.0f;
+		const char* msg1 = "SAVE PROFILE";
+		const char* msg2 = "Press ESC to cancel.";
+		float x1 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * SDL_strlen(msg1)) / 2.0f;
+		float x2 = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * SDL_strlen(msg2)) / 2.0f;
+		SDL_SetRenderDrawColor(renderer, 255, 255, 100, 255);
+		SDL_RenderDebugText(renderer, x1, y_pos, msg1);
+		y_pos += line_height * 1.5f;
+
+		char display_buffer[128];
+		snprintf(display_buffer, sizeof(display_buffer), "%s_", filename_input_buffer);
+		float x_input = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * SDL_strlen(display_buffer)) / 2.0f;
+		SDL_RenderDebugText(renderer, x_input, y_pos, display_buffer);
+		y_pos += line_height * 1.5f;
+
+		SDL_RenderDebugText(renderer, x2, y_pos, msg2);
+	}
+	else if (is_choosing_profile) {
+		y_pos = 10.0f;
+		const char* title = "LOAD PROFILE (ENTER to select, ESC to cancel)";
+		float x_title = (w - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * SDL_strlen(title)) / 2.0f;
+		SDL_SetRenderDrawColor(renderer, 255, 255, 100, 255);
+		SDL_RenderDebugText(renderer, x_title, y_pos, title);
+		y_pos += line_height * 2.0f;
+
+		for (int i = 0; i < num_profiles; ++i) {
+			bool is_selected = (i == selected_profile_index);
+			if (is_selected) {
+				SDL_SetRenderDrawColor(renderer, 255, 255, 100, 255);
+			}
+			else {
+				SDL_SetRenderDrawColor(renderer, 200, 200, 255, 255);
+			}
+			char display_buffer[128];
+			snprintf(display_buffer, sizeof(display_buffer), "%s %s", is_selected ? ">" : " ", profile_filenames[i]);
+			SDL_RenderDebugText(renderer, 20, y_pos, display_buffer);
+			y_pos += line_height;
+		}
+	}
 	else if (calibration_state != CALIBRATION_IDLE) {
 		y_pos = (h - (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * 7) / 2.0f;
 		char buffer[128];
@@ -1978,6 +2306,8 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
 void SDL_AppQuit(void* appstate, SDL_AppResult result)
 {
+	FreeProfileList();
+
 	// --- Stop and clean up the mouse thread ---
 	if (mouse_thread_handle) {
 		run_mouse_thread = false;
