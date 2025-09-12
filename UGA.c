@@ -179,6 +179,7 @@ void display_led_color(char* buffer, size_t size);
 void execute_hide_controller(int direction);
 void display_hide_controller(char* buffer, size_t size);
 void execute_load_profile(int direction);
+void display_profile_count(char* buffer, size_t size);
 void execute_save_profile(int direction);
 void display_current_profile(char* buffer, size_t size);
 void execute_reset_app(int direction);
@@ -197,7 +198,7 @@ static MenuItem menu_items[] = {
 	{ "Calibrate Flick Stick", execute_calibrate_flick,     display_flick_calibration },
 	{ "LED Color",             execute_change_led,          display_led_color },
 	{ "Hide Controller",       execute_hide_controller,     display_hide_controller },
-	{ "Load Profile",          execute_load_profile,        NULL },
+	{ "Load Profile",          execute_load_profile,        display_profile_count  },
 	{ "Save Profile",          execute_save_profile,        display_current_profile },
 	{ "Reset Application",     execute_reset_app,           NULL }
 };
@@ -1039,6 +1040,36 @@ static bool reset_application(void)
 }
 
 // --- Menu Action & Display Functions ---
+
+static int CountProfiles(void) {
+	char search_path[MAX_PATH];
+	if (!GetProfilesDir(search_path, MAX_PATH)) {
+		return 0;
+	}
+	PathAppendA(search_path, "*.ini");
+
+	WIN32_FIND_DATAA find_data;
+	HANDLE find_handle = FindFirstFileA(search_path, &find_data);
+
+	if (find_handle == INVALID_HANDLE_VALUE) {
+		return 0;
+	}
+
+	int count = 0;
+	do {
+		if (!(find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+			count++;
+		}
+	} while (FindNextFileA(find_handle, &find_data) != 0);
+
+	FindClose(find_handle);
+	return count;
+}
+
+void display_profile_count(char* buffer, size_t size) {
+	int profile_count = CountProfiles();
+	snprintf(buffer, size, "[%d]", profile_count);
+}
 
 // Helper to free profile list memory
 static void FreeProfileList() {
