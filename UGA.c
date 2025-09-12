@@ -1338,6 +1338,7 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			SDL_Log("Ignoring additional controller: %s", SDL_GetGamepadName(temp_pad));
 			SDL_CloseGamepad(temp_pad);
 		}
+		force_one_render = true;
 		break;
 	}
 
@@ -1349,6 +1350,7 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 			SDL_CloseGamepad(gamepad);
 			gamepad = NULL;
 			controller_has_led = false;
+			force_one_render = true;
 			// Reset aiming state on disconnect
 			settings.selected_button = -1;
 			settings.selected_axis = -1;
@@ -1429,6 +1431,11 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 				else if (calibration_state == CALIBRATION_WAITING_FOR_STABILITY || calibration_state == CALIBRATION_SAMPLING) {
 					if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST) { // 'B' button to cancel
 						calibration_state = CALIBRATION_IDLE;
+						stability_timer_start_time = 0;
+						calibration_sample_count = 0;
+						gyro_accumulator[0] = 0.0f;
+						gyro_accumulator[1] = 0.0f;
+						gyro_accumulator[2] = 0.0f;
 						force_one_render = true;
 						SDL_Log("Gyro calibration cancelled by user.");
 						button_handled = true;
