@@ -2027,6 +2027,9 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 				report.sThumbRY = (ry == -32768) ? 32767 : -ry;
 			}
 			else { // Joystick Mode
+				EnterCriticalSection(&data_lock);
+				shared_mouse_aim_active = false;
+				LeaveCriticalSection(&data_lock);
 				float combined_x = (float)rx;
 				float combined_y = (ry == -32768) ? 32767.f : (float)-ry;
 
