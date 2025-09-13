@@ -8,6 +8,14 @@ The application uses the SDL3 library to read input from a wide range of physica
 
 Please note that this is a proof-of-concept project. The code is crude, unoptimized, and serves as a basic implementation of the idea. It may contain bugs or performance issues and is not intended for robust, everyday use without further development.
 
+## Features
+
+- **Gyro to Joystick:** Maps gyro movement to the right analog stick of a virtual Xbox 360 controller.
+- **Gyro to Mouse:** Maps gyro movement directly to the system mouse cursor for aiming in any game.
+- **Flick Stick:** Implements a proof-of-concept Flick Stick, allowing for rapid 180° or 360° turns using the right analog stick.
+- **On-the-Fly Configuration:** A simple in-app UI allows you to adjust sensitivity, toggle modes, and calibrate settings.
+- **Profile System:** Save and load your game configurations as `.ini` files.
+
 ## Requirements
 
 To use this application, you **must** have the following drivers installed and configured on your system:
