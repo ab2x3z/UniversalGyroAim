@@ -11,7 +11,7 @@ Please note that this is a proof-of-concept project. The code is crude, unoptimi
 ## Features
 
 - **Gyro to Joystick:** Maps gyro movement to the right analog stick of a virtual Xbox 360 controller.
-- **Gyro to Mouse:** Maps gyro movement directly to the system mouse cursor for aiming in any game.
+- **Gyro to Mouse:** Maps gyro movement directly to the system mouse cursor.
 - **Flick Stick:** Implements a proof-of-concept Flick Stick, allowing for rapid 180° or 360° turns using the right analog stick.
 - **On-the-Fly Configuration:** A simple in-app UI allows you to adjust sensitivity, toggle modes, and calibrate settings.
 - **Profile System:** Save and load your game configurations as `.ini` files.
