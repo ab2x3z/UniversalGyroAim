@@ -24,7 +24,8 @@ static bool ExecuteCommand(const wchar_t* command)
 		GetExitCodeProcess(pi.hProcess, &exit_code);
 		CloseHandle(pi.hProcess);
 		CloseHandle(pi.hThread);
-	} else {
+	}
+	else {
 		SDL_Log("CreateProcess failed (%lu) for command: %ls", GetLastError(), command);
 	}
 	free(cmd_mutable);
@@ -109,7 +110,8 @@ void UnhidePhysicalController(void)
 		SDL_Log("Physical controller successfully unhidden.");
 		is_controller_hidden = false;
 		hidden_device_instance_path[0] = L'\0';
-	} else {
+	}
+	else {
 		SDL_Log("Failed to unhide physical controller.");
 	}
 }
@@ -144,7 +146,8 @@ void HidePhysicalController(SDL_Gamepad* pad_to_hide)
 	if (ExecuteCommand(command)) {
 		is_controller_hidden = true;
 		SDL_Log("Successfully hid physical controller.");
-	} else {
+	}
+	else {
 		is_controller_hidden = true;
 		SDL_Log("Failed to enable HidHide service, but device may still be hidden.");
 	}

@@ -19,7 +19,8 @@ void Input_HandleGamepadAdded(SDL_Event* event)
 	if (vendor == VIRTUAL_VENDOR_ID && product == VIRTUAL_PRODUCT_ID) {
 		SDL_Log("Ignoring our own virtual controller.");
 		SDL_CloseGamepad(temp_pad);
-	} else if (!gamepad) {
+	}
+	else if (!gamepad) {
 		gamepad = temp_pad;
 		gamepad_instance_id = event->gdevice.which;
 		SDL_Log("Opened gamepad: %s (VID: %04X, PID: %04X)", name, vendor, product);
@@ -27,7 +28,8 @@ void Input_HandleGamepadAdded(SDL_Event* event)
 		HidePhysicalController(gamepad);
 		if (SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, true) < 0) {
 			SDL_Log("Could not enable gyroscope: %s", SDL_GetError());
-		} else {
+		}
+		else {
 			SDL_Log("Gyroscope enabled!");
 		}
 
@@ -36,10 +38,12 @@ void Input_HandleGamepadAdded(SDL_Event* event)
 		if (controller_has_led) {
 			SDL_Log("Controller supports programmable LED.");
 			UpdatePhysicalControllerLED();
-		} else {
+		}
+		else {
 			SDL_Log("Controller does not support programmable LED.");
 		}
-	} else {
+	}
+	else {
 		SDL_Log("Ignoring additional controller: %s", SDL_GetGamepadName(temp_pad));
 		SDL_CloseGamepad(temp_pad);
 	}
@@ -89,12 +93,14 @@ void Input_HandleGamepadButton(SDL_Event* event)
 				calibration_state = FLICK_STICK_CALIBRATION_TURNING;
 				flick_stick_turn_remaining = settings.flick_stick_calibration_value;
 				button_handled = true;
-			} else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST) {
+			}
+			else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST) {
 				calibration_state = CALIBRATION_IDLE;
 				force_one_render = true;
 				button_handled = true;
 			}
-		} else if (calibration_state == FLICK_STICK_CALIBRATION_ADJUST) {
+		}
+		else if (calibration_state == FLICK_STICK_CALIBRATION_ADJUST) {
 			if (event->gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_UP) settings.flick_stick_calibration_value += 50.0f;
 			else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_DOWN) settings.flick_stick_calibration_value -= 50.0f;
 			else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_RIGHT) settings.flick_stick_calibration_value += 1.0f;
@@ -104,7 +110,8 @@ void Input_HandleGamepadButton(SDL_Event* event)
 			else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH) {
 				calibration_state = FLICK_STICK_CALIBRATION_TURNING;
 				flick_stick_turn_remaining = settings.flick_stick_calibration_value;
-			} else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST) {
+			}
+			else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST) {
 				settings.flick_stick_calibrated = true;
 				calibration_state = CALIBRATION_IDLE;
 				force_one_render = true;
@@ -112,7 +119,8 @@ void Input_HandleGamepadButton(SDL_Event* event)
 				SDL_Log("Flick Stick calibration saved. Value: %.2f", settings.flick_stick_calibration_value);
 			}
 			button_handled = true;
-		} else if (calibration_state == CALIBRATION_WAITING_FOR_STABILITY || calibration_state == CALIBRATION_SAMPLING) {
+		}
+		else if (calibration_state == CALIBRATION_WAITING_FOR_STABILITY || calibration_state == CALIBRATION_SAMPLING) {
 			if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST) {
 				calibration_state = CALIBRATION_IDLE;
 				stability_timer_start_time = 0;
@@ -134,7 +142,7 @@ void Input_HandleGamepadButton(SDL_Event* event)
 void Input_HandleGamepadAxis(SDL_Event* event)
 {
 	if (event->gaxis.which != gamepad_instance_id) return;
-	
+
 	if (is_waiting_for_aim_button) {
 		if ((event->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || event->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) && event->gaxis.value > 8000) {
 			settings.selected_axis = event->gaxis.axis;
@@ -181,7 +189,8 @@ void Input_HandleGamepadSensor(SDL_Event* event)
 		if (is_stable) {
 			if (stability_timer_start_time == 0) {
 				stability_timer_start_time = SDL_GetPerformanceCounter();
-			} else {
+			}
+			else {
 				Uint64 elapsed_ms = (SDL_GetPerformanceCounter() - stability_timer_start_time) * 1000 / SDL_GetPerformanceFrequency();
 				if (elapsed_ms >= GYRO_STABILITY_DURATION_MS) {
 					calibration_state = CALIBRATION_SAMPLING;
@@ -190,7 +199,8 @@ void Input_HandleGamepadSensor(SDL_Event* event)
 					SDL_Log("Controller is stable. Starting data collection...");
 				}
 			}
-		} else {
+		}
+		else {
 			stability_timer_start_time = 0;
 		}
 		break;
@@ -280,14 +290,16 @@ void Input_ProcessAndPassthrough(XUSB_REPORT* report)
 				while (flick_angle <= -(float)M_PI) flick_angle += (2.0f * (float)M_PI);
 				while (flick_angle > (float)M_PI) flick_angle -= (2.0f * (float)M_PI);
 				flick_stick_output_x = -(flick_angle / (float)M_PI) * (settings.flick_stick_calibration_value / 2.0f);
-			} else {
+			}
+			else {
 				float delta_angle = current_angle - flick_last_angle;
 				if (delta_angle > M_PI) delta_angle -= (2.0f * (float)M_PI);
 				if (delta_angle < -M_PI) delta_angle += (2.0f * (float)M_PI);
 				flick_stick_output_x = -(delta_angle / (2.0f * (float)M_PI)) * settings.flick_stick_calibration_value;
 			}
 			flick_last_angle = current_angle;
-		} else {
+		}
+		else {
 			is_flick_stick_active = false;
 		}
 
@@ -296,10 +308,11 @@ void Input_ProcessAndPassthrough(XUSB_REPORT* report)
 		shared_flick_stick_delta_x += flick_stick_output_x;
 		LeaveCriticalSection(&data_lock);
 		report->sThumbRX = 0; report->sThumbRY = 0;
-	} else { // Standard logic
+	}
+	else { // Standard logic
 		bool stick_in_use = sqrtf((float)rx * rx + (float)ry * ry) > 8000.0f;
 		bool use_gyro_for_aim = gyro_is_active && !stick_in_use;
-		
+
 		report->sThumbRX = rx;
 		report->sThumbRY = (ry == -32768) ? 32767 : -ry;
 
@@ -307,7 +320,8 @@ void Input_ProcessAndPassthrough(XUSB_REPORT* report)
 			EnterCriticalSection(&data_lock);
 			shared_mouse_aim_active = use_gyro_for_aim;
 			LeaveCriticalSection(&data_lock);
-		} else { // Joystick Mode
+		}
+		else { // Joystick Mode
 			EnterCriticalSection(&data_lock);
 			shared_mouse_aim_active = false;
 			LeaveCriticalSection(&data_lock);

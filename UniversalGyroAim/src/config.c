@@ -114,10 +114,12 @@ void SaveSettings(const char* profile_name) {
 	if (settings.selected_button != -1) {
 		fprintf(file, "aim_input_type = button\n");
 		fprintf(file, "aim_input_value = %s\n", SDL_GetGamepadStringForButton(settings.selected_button));
-	} else if (settings.selected_axis != -1) {
+	}
+	else if (settings.selected_axis != -1) {
 		fprintf(file, "aim_input_type = axis\n");
 		fprintf(file, "aim_input_value = %s\n", SDL_GetGamepadStringForAxis(settings.selected_axis));
-	} else {
+	}
+	else {
 		fprintf(file, "aim_input_type = none\n");
 	}
 	fprintf(file, "led_color = #%02X%02X%02X\n", settings.led_r, settings.led_g, settings.led_b);
@@ -166,41 +168,58 @@ bool LoadSettings(const char* profile_name) {
 
 		if (_stricmp(key, "config_version") == 0) {
 			if (atoi(value) != CURRENT_CONFIG_VERSION) SDL_Log("Warning: Profile version mismatch in %s.", profile_name);
-		} else if (_stricmp(key, "mouse_mode") == 0) {
+		}
+		else if (_stricmp(key, "mouse_mode") == 0) {
 			settings.mouse_mode = (_stricmp(value, "true") == 0);
-		} else if (_stricmp(key, "sensitivity") == 0) {
+		}
+		else if (_stricmp(key, "sensitivity") == 0) {
 			settings.sensitivity = (float)atof(value);
-		} else if (_stricmp(key, "mouse_sensitivity") == 0) {
+		}
+		else if (_stricmp(key, "mouse_sensitivity") == 0) {
 			settings.mouse_sensitivity = (float)atof(value);
-		} else if (_stricmp(key, "always_on_gyro") == 0) {
+		}
+		else if (_stricmp(key, "always_on_gyro") == 0) {
 			settings.always_on_gyro = (_stricmp(value, "true") == 0);
-		} else if (_stricmp(key, "invert_gyro_x") == 0) {
+		}
+		else if (_stricmp(key, "invert_gyro_x") == 0) {
 			settings.invert_gyro_x = (_stricmp(value, "true") == 0);
-		} else if (_stricmp(key, "invert_gyro_y") == 0) {
+		}
+		else if (_stricmp(key, "invert_gyro_y") == 0) {
 			settings.invert_gyro_y = (_stricmp(value, "true") == 0);
-		} else if (_stricmp(key, "anti_deadzone") == 0) {
+		}
+		else if (_stricmp(key, "anti_deadzone") == 0) {
 			settings.anti_deathzone = (float)atof(value);
-		} else if (_stricmp(key, "aim_input_type") == 0) {
+		}
+		else if (_stricmp(key, "aim_input_type") == 0) {
 			strcpy_s(aim_type, sizeof(aim_type), value);
-		} else if (_stricmp(key, "aim_input_value") == 0) {
+		}
+		else if (_stricmp(key, "aim_input_value") == 0) {
 			if (_stricmp(aim_type, "button") == 0) {
 				settings.selected_button = GamepadButtonFromString(value); settings.selected_axis = -1;
-			} else if (_stricmp(aim_type, "axis") == 0) {
+			}
+			else if (_stricmp(aim_type, "axis") == 0) {
 				settings.selected_axis = GamepadAxisFromString(value); settings.selected_button = -1;
 			}
-		} else if (_stricmp(key, "led_color") == 0) {
+		}
+		else if (_stricmp(key, "led_color") == 0) {
 			ParseHexColor(value, &settings.led_r, &settings.led_g, &settings.led_b);
-		} else if (_stricmp(key, "gyro_offset_pitch") == 0) {
+		}
+		else if (_stricmp(key, "gyro_offset_pitch") == 0) {
 			settings.gyro_calibration_offset[0] = (float)atof(value);
-		} else if (_stricmp(key, "gyro_offset_yaw") == 0) {
+		}
+		else if (_stricmp(key, "gyro_offset_yaw") == 0) {
 			settings.gyro_calibration_offset[1] = (float)atof(value);
-		} else if (_stricmp(key, "gyro_offset_roll") == 0) {
+		}
+		else if (_stricmp(key, "gyro_offset_roll") == 0) {
 			settings.gyro_calibration_offset[2] = (float)atof(value);
-		} else if (_stricmp(key, "flick_stick_enabled") == 0) {
+		}
+		else if (_stricmp(key, "flick_stick_enabled") == 0) {
 			settings.flick_stick_enabled = (_stricmp(value, "true") == 0);
-		} else if (_stricmp(key, "flick_stick_calibrated") == 0) {
+		}
+		else if (_stricmp(key, "flick_stick_calibrated") == 0) {
 			settings.flick_stick_calibrated = (_stricmp(value, "true") == 0);
-		} else if (_stricmp(key, "flick_stick_value") == 0) {
+		}
+		else if (_stricmp(key, "flick_stick_value") == 0) {
 			settings.flick_stick_calibration_value = (float)atof(value);
 		}
 	}
@@ -222,7 +241,8 @@ void UpdatePhysicalControllerLED(void)
 	if (!gamepad) return;
 	if (SDL_SetGamepadLED(gamepad, settings.led_r, settings.led_g, settings.led_b) < 0) {
 		SDL_Log("Warning: Could not set gamepad LED color: %s", SDL_GetError());
-	} else {
+	}
+	else {
 		SDL_Log("Successfully set physical gamepad LED to #%02X%02X%02X", settings.led_r, settings.led_g, settings.led_b);
 	}
 }

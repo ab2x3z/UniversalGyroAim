@@ -44,7 +44,7 @@ bool App_Reset(void)
 	}
 
 	App_FindAndOpenPhysicalGamepad();
-	
+
 	if (!LoadSettings(DEFAULT_PROFILE_FILENAME)) {
 		SetDefaultSettings();
 	}
